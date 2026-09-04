@@ -1,19 +1,9 @@
-# Hospital AR Camera Demo v2
+# Hospital AR Web Prototype
 
-نسخه سبک برای تست گوشی: Camera واقعی + QR Anchor + Heading + Step Detection + Distance + Re-calibration.
+Next.js + Babylon.js + Camera + QR + Compass + Step Detection + Position Engine.
 
-## اجرا
+Run:
 `npm install`
 `npm run dev`
 
-روی دسکتاپ: `http://localhost:3000`
-برای گوشی: Camera API به HTTPS نیاز دارد؛ Render Static Site یا HTTPS لوکال استفاده کنید.
-
-## مدل PoC
-QR = موقعیت مرجع دقیق؛ نقشه = فاصله واقعی بین نقاط؛ Step Detection = تخمین حرکت بین دو QR؛ Heading = جهت فلش؛ QR بعدی = اصلاح موقعیت.
-
-این نسخه هنوز positioning تجاری/سانتی‌متری نیست. برای Production می‌توان Step/AR tracking را با ARCore/ARKit یا راهکار دقیق‌تر جایگزین کرد.
-
-
-### Camera selection
-On desktop, the demo automatically prefers an iVCam/e2eSoft virtual camera when Windows exposes it to the browser. On real phones it prefers the rear/environment camera. No camera selector is shown to the user.
+For phone testing use HTTPS or localhost. This is a proof-of-concept: browser sensors and step detection are approximate; Babylon.js is included as a 3D/AR scaffold, while the visible arrow uses a camera overlay for broad browser compatibility.
