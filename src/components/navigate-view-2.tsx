@@ -15,15 +15,6 @@ import {
 
 type Phase = "pick" | "preview" | "guide";
 
-/** حداقل شکلی از XRSession که استفاده می‌کنیم — کتابخانه‌ی نوع WebXR رسمی توی این پروژه نصب نیست. */
-type XRSessionLike = {
-  end: () => Promise<void>;
-  requestAnimationFrame: (cb: (t: number, frame: unknown) => number | void) => number;
-  updateRenderState: (state: Record<string, unknown>) => void;
-  requestReferenceSpace: (type: string) => Promise<unknown>;
-  addEventListener: (type: string, cb: () => void) => void;
-};
-
 const STEP_LENGTH_M = 0.75; // میانگین طول قدم — قابل کالیبره‌کردن
 const STEP_THRESHOLD = 1.6; // آستانه‌ی شتاب برای تشخیص قدم — روی گوشی واقعی تنظیم کن
 const STEP_COOLDOWN_MS = 300; // حداقل فاصله بین دو قدم پشت‌سرهم
@@ -63,16 +54,6 @@ export function NavigateView({ plan }: { plan: FloorPlan }) {
   const targetBearingRef = useRef(0);
   const liveHeadingRef = useRef(0);
   const hasCompassRef = useRef(false);
-  // --- AR واقعی (WebXR / ARCore — فقط Chrome روی اندروید) ---
-  const [arSupported, setArSupported] = useState<boolean | null>(null);
-  const [arActive, setArActive] = useState(false);
-  const [arError, setArError] = useState<string | null>(null);
-  const [arPos, setArPos] = useState<{ x: number; y: number } | null>(null);
-  const arSessionRef = useRef<XRSessionLike | null>(null);
-  const arStartHeadingRef = useRef(0);
-  const arStartWorldPosRef = useRef<{ x: number; y: number; z: number } | null>(null);
-  const arOverlayRef = useRef<HTMLDivElement>(null);
-  const arLastUpdateRef = useRef(0);
 
   const originNode = plan.nodes.find((n) => n.kind === "origin");
   const destinationNodes = plan.nodes.filter((n) => n.kind === "destination");
@@ -95,17 +76,6 @@ export function NavigateView({ plan }: { plan: FloorPlan }) {
   useEffect(() => { targetBearingRef.current = targetBearing; }, [targetBearing]);
   useEffect(() => { liveHeadingRef.current = liveHeading; }, [liveHeading]);
   useEffect(() => { hasCompassRef.current = heading !== null; }, [heading]);
-
-  // وقتی AR واقعی فعاله، فاصله/جهت از روی موقعیتِ واقعیِ ARCore حساب می‌شه،
-  // نه از روی تخمینِ قدم‌شمار — دقیق‌تره و مسیر راهرو رو دنبال نمی‌کنه، مستقیم
-  // به مقصد اشاره می‌کنه.
-  const arRemainingM =
-    arActive && arPos && destination
-      ? Math.hypot(destination.x - arPos.x, destination.y - arPos.y) * plan.metersPerPixel
-      : null;
-  const arBearing = arActive && arPos && destination ? headingFor(arPos, destination) : 0;
-  const arArrowAngle = signedDeg(arBearing - liveHeading);
-  const arArrived = arRemainingM !== null && arRemainingM < 0.4;
 
   async function requestCompass() {
     const DOE = DeviceOrientationEvent as unknown as {
@@ -179,102 +149,12 @@ export function NavigateView({ plan }: { plan: FloorPlan }) {
       motionAttachedRef.current = true;
       setMotionActive(true);
     }
-    // فقط Chrome روی اندروید (ARCore) به immersive-ar جواب مثبت می‌ده
-    const xr = (navigator as unknown as { xr?: { isSessionSupported: (m: string) => Promise<boolean> } }).xr;
-    if (xr?.isSessionSupported) {
-      xr.isSessionSupported("immersive-ar").then(setArSupported).catch(() => setArSupported(false));
-    } else {
-      setArSupported(false);
-    }
     return () => {
       window.removeEventListener("deviceorientation", onOrientHandler, true);
       window.removeEventListener("devicemotion", onMotionHandler, true);
-      arSessionRef.current?.end().catch(() => {});
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  /**
-   * روشن‌کردن AR واقعی: یه session خام WebXR می‌گیریم (بدون three.js — فقط یه
-   * کانواس WebGL خالی که compositor سیستم لازم داره، هیچ‌چی روش رندر نمی‌کنیم
-   * چون تصویر دوربین رو خودِ سیستم می‌ذاره زیرِ UI). هر فریم، موقعیت واقعیِ
-   * گوشی رو (بر حسب متر، نسبت به نقطه‌ی شروع) می‌گیریم، با قطب‌نمای لحظه‌ی
-   * شروع می‌چرخونیمش به مختصات شمال/شرق، و به پیکسل روی نقشه تبدیلش می‌کنیم.
-   */
-  async function startArSession() {
-    setArError(null);
-    const xr = (navigator as unknown as {
-      xr?: { requestSession: (mode: string, opts: Record<string, unknown>) => Promise<XRSessionLike> };
-    }).xr;
-    if (!xr) {
-      setArError("این مرورگر از AR واقعی پشتیبانی نمی‌کند.");
-      return;
-    }
-    try {
-      const canvas = document.createElement("canvas");
-      const gl = canvas.getContext("webgl", { xrCompatible: true }) as (WebGLRenderingContext & {
-        makeXRCompatible?: () => Promise<void>;
-      }) | null;
-      if (!gl) throw new Error("no-webgl");
-      if (gl.makeXRCompatible) await gl.makeXRCompatible();
-
-      const session = await xr.requestSession("immersive-ar", {
-        requiredFeatures: ["local"],
-        optionalFeatures: arOverlayRef.current ? ["dom-overlay"] : [],
-        ...(arOverlayRef.current ? { domOverlay: { root: arOverlayRef.current } } : {}),
-      });
-      arSessionRef.current = session;
-
-      const XRWebGLLayerCtor = (window as unknown as { XRWebGLLayer: new (s: unknown, g: unknown) => unknown })
-        .XRWebGLLayer;
-      session.updateRenderState({ baseLayer: new XRWebGLLayerCtor(session, gl) });
-      const refSpace = await session.requestReferenceSpace("local");
-
-      arStartHeadingRef.current = hasCompassRef.current ? liveHeadingRef.current : 0;
-      arStartWorldPosRef.current = null;
-      setArActive(true);
-
-      const onXRFrame = (_t: number, frame: unknown) => {
-        session.requestAnimationFrame(onXRFrame);
-        const f = frame as { getViewerPose: (rs: unknown) => { transform: { position: { x: number; y: number; z: number } } } | null };
-        const pose = f.getViewerPose(refSpace);
-        if (!pose) return;
-        const p = pose.transform.position;
-        if (!arStartWorldPosRef.current) {
-          arStartWorldPosRef.current = { x: p.x, y: p.y, z: p.z };
-          return;
-        }
-        const now = performance.now();
-        if (now - arLastUpdateRef.current < 100) return; // ~10 بار در ثانیه کافیه
-        arLastUpdateRef.current = now;
-
-        const dx = p.x - arStartWorldPosRef.current.x;
-        const dz = p.z - arStartWorldPosRef.current.z;
-        const theta = (arStartHeadingRef.current * Math.PI) / 180;
-        // چرخوندن جابه‌جاییِ محلیِ AR به مختصات شمال/شرقِ واقعی، طبق قطب‌نمای لحظه‌ی شروع
-        const east = dx * Math.cos(theta) - dz * Math.sin(theta);
-        const north = -dx * Math.sin(theta) - dz * Math.cos(theta);
-        if (originNode) {
-          setArPos({
-            x: originNode.x + east / plan.metersPerPixel,
-            y: originNode.y - north / plan.metersPerPixel,
-          });
-        }
-      };
-      session.requestAnimationFrame(onXRFrame);
-      session.addEventListener("end", () => {
-        setArActive(false);
-        setArPos(null);
-        arSessionRef.current = null;
-      });
-    } catch (err) {
-      setArError(err instanceof Error ? err.message : "شروع AR واقعی ناموفق بود.");
-    }
-  }
-
-  function stopArSession() {
-    arSessionRef.current?.end().catch(() => {});
-  }
 
   useEffect(() => {
     return () => {
@@ -440,10 +320,7 @@ export function NavigateView({ plan }: { plan: FloorPlan }) {
         style={{ opacity: camReady ? 1 : 0 }}
       />
 
-      <div
-        ref={arOverlayRef}
-        className="relative z-10 mx-auto flex min-h-[calc(100dvh-3.5rem)] w-full max-w-3xl flex-col justify-between gap-3 p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]"
-      >
+      <div className="relative z-10 mx-auto flex min-h-[calc(100dvh-3.5rem)] w-full max-w-3xl flex-col justify-between gap-3 p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
         <div className="flex items-center justify-between gap-2">
           <Button
             variant="secondary"
@@ -455,7 +332,7 @@ export function NavigateView({ plan }: { plan: FloorPlan }) {
             خروج
           </Button>
           <Badge variant="muted" className="bg-nav-fg/12 text-nav-fg">
-            {arActive ? "AR واقعی فعال" : camReady ? "دوربین فعال" : "پیش‌نمایش مسیر"}
+            {camReady ? "دوربین فعال" : "پیش‌نمایش مسیر"}
           </Badge>
         </div>
 
@@ -464,7 +341,7 @@ export function NavigateView({ plan }: { plan: FloorPlan }) {
             <FloorCanvas
               plan={plan}
               path={pathNodes}
-              travelledPx={arActive && arPos ? undefined : travelled}
+              travelledPx={travelled}
               interactive={false}
             />
           </div>
@@ -472,64 +349,35 @@ export function NavigateView({ plan }: { plan: FloorPlan }) {
 
         <div className="flex flex-col items-center text-center">
           <p className="text-4xl font-semibold tabular-nums tracking-tight">
-            {arActive
-              ? arArrived
-                ? "رسیدید"
-                : arRemainingM !== null
-                  ? `${arRemainingM.toFixed(0)} m`
-                  : "در حال یافتن موقعیت..."
-              : arrived
-                ? "رسیدید"
-                : `${remainingM.toFixed(0)} m`}
+            {arrived ? "رسیدید" : `${remainingM.toFixed(0)} m`}
           </p>
-          <GuideArrow angle={arActive ? arArrowAngle : arrowAngle} />
+          <GuideArrow angle={arrowAngle} />
           <p className="mt-1 rounded-full bg-nav-fg/12 px-3 py-1 text-xs tabular-nums">
-            {arActive
-              ? arArrived
-                ? `به ${destination?.name ?? ""} رسیدید`
-                : "موقعیت واقعی (ARCore)"
-              : arrived
-                ? `به ${destination?.name ?? ""} رسیدید`
-                : heading === null
-                  ? `شبیه‌ساز قطب‌نما · بخش ${traveler?.legIndex ?? 0}/${Math.max(1, pathNodes.length - 1)}`
-                  : `بخش ${traveler?.legIndex ?? 0}/${Math.max(1, pathNodes.length - 1)}`}
+            {arrived
+              ? `به ${destination?.name ?? ""} رسیدید`
+              : heading === null
+                ? `شبیه‌ساز قطب‌نما · بخش ${traveler?.legIndex ?? 0}/${Math.max(1, pathNodes.length - 1)}`
+                : `بخش ${traveler?.legIndex ?? 0}/${Math.max(1, pathNodes.length - 1)}`}
           </p>
         </div>
 
         <div className="space-y-2">
-          {arSupported && (
+          <div className="grid grid-cols-2 gap-2">
             <Button
               variant="secondary"
-              className={`w-full shadow-none ${arActive ? "bg-red-500/80 text-white hover:bg-red-500" : "bg-nav-fg/12 text-nav-fg hover:bg-nav-fg/18"}`}
-              onClick={arActive ? stopArSession : startArSession}
+              className="bg-nav-fg/12 text-nav-fg shadow-none hover:bg-nav-fg/18"
+              onClick={() => setWalking((w) => !w)}
+              disabled={arrived}
             >
-              <Navigation />
-              {arActive ? "خاموش کردن AR واقعی" : "روشن کردن AR واقعی (ARCore)"}
+              {walking ? <Pause /> : <Play />}
+              {walking ? "توقف شبیه‌سازی" : "شبیه‌سازی حرکت"}
             </Button>
-          )}
-          {arError && (
-            <p className="rounded-xl bg-nav-fg/10 px-3 py-2 text-center text-xs text-nav-fg/80">
-              {arError}
-            </p>
-          )}
-          {!arActive && (
-            <div className="grid grid-cols-2 gap-2">
-              <Button
-                variant="secondary"
-                className="bg-nav-fg/12 text-nav-fg shadow-none hover:bg-nav-fg/18"
-                onClick={() => setWalking((w) => !w)}
-                disabled={arrived}
-              >
-                {walking ? <Pause /> : <Play />}
-                {walking ? "توقف شبیه‌سازی" : "شبیه‌سازی حرکت"}
-              </Button>
-              <div className="flex items-center justify-center gap-2 rounded-2xl bg-nav-fg/12 px-3 text-xs">
-                <Footprints className="size-4 shrink-0" />
-                {motionActive ? `${stepCount} قدم واقعی` : "قدم‌شمار غیرفعال"}
-              </div>
+            <div className="flex items-center justify-center gap-2 rounded-2xl bg-nav-fg/12 px-3 text-xs">
+              <Footprints className="size-4 shrink-0" />
+              {motionActive ? `${stepCount} قدم واقعی` : "قدم‌شمار غیرفعال"}
             </div>
-          )}
-          {!motionActive && !arActive && (
+          </div>
+          {!motionActive && (
             <Button
               variant="secondary"
               className="w-full bg-nav-fg/12 text-nav-fg shadow-none hover:bg-nav-fg/18"
@@ -544,7 +392,7 @@ export function NavigateView({ plan }: { plan: FloorPlan }) {
               {sensorError}
             </p>
           )}
-          {heading === null && !arActive && (
+          {heading === null && (
             <label className="flex items-center gap-3 rounded-xl bg-nav-fg/10 px-3 py-2 text-xs">
               <Compass className="size-4 shrink-0" />
               <span className="w-16 tabular-nums">{Math.round(simHeading)}°</span>
