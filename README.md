@@ -1,9 +1,29 @@
-# Hospital AR Web Prototype
+# Hospital Single-QR AR Navigation PoC
 
-Next.js + Babylon.js + Camera + QR + Compass + Step Detection + Position Engine.
+این نسخه دقیقاً برای سناریوی جدید طراحی شده است:
 
-Run:
+1. فقط یک QR داخل اتاق A نصب است.
+2. QR شامل `source` و `destinationId` است؛ یا می‌تواند مختصات مقصد را داخل `destination` بدهد.
+3. بعد از اسکن، مقصد از نقشه از پیش تعریف‌شده پیدا می‌شود.
+4. مسیر روی نقشه نمایش داده می‌شود.
+5. Camera AR باز می‌شود و فلش جهت مسیر را نشان می‌دهد.
+6. هیچ QR دیگری در اتاق B یا بین مسیر لازم نیست.
+
+نمونه payload:
+```json
+{"source":"ROOM-A","destinationId":"MRI"}
+```
+
+برای مقصد سفارشی:
+```json
+{"source":"ROOM-A","destination":{"x":16,"y":3,"name":"MRI"}}
+```
+
+## اجرا
 `npm install`
 `npm run dev`
 
-For phone testing use HTTPS or localhost. This is a proof-of-concept: browser sensors and step detection are approximate; Babylon.js is included as a 3D/AR scaffold, while the visible arrow uses a camera overlay for broad browser compatibility.
+برای گوشی، Camera/Motion API باید روی HTTPS اجرا شود.
+
+## نکته فنی
+این یک PoC مرورگری است. بعد از QR اولیه، موقعیت لحظه‌ای با سنسورهای گوشی تخمین زده می‌شود و ممکن است drift داشته باشد. برای positioning دقیق production باید ARCore/ARKit یا یک سیستم indoor positioning دقیق اضافه شود.

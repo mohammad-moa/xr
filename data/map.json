@@ -1,0 +1,12 @@
+{
+  "mapName":"Hospital Floor 1",
+  "origin":{"id":"ROOM-A","name":"اتاق A","x":2,"y":12},
+  "destinations":[
+    {"id":"MRI","name":"MRI / تصویربرداری","icon":"🩻","x":16,"y":3},
+    {"id":"LAB","name":"آزمایشگاه","icon":"🧪","x":11,"y":17},
+    {"id":"CARDIO","name":"قلب","icon":"❤️","x":25,"y":12}
+  ],
+  "routeNodes":[
+    {"id":"A","x":2,"y":12},{"id":"C1","x":8,"y":12},{"id":"C2","x":8,"y":5},{"id":"C3","x":16,"y":5},{"id":"C4","x":16,"y":3}
+  ]
+}
