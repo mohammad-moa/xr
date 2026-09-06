@@ -1,0 +1,36 @@
+{
+  "url": "http://127.0.0.1:8080/",
+  "viewports": {
+    "desktop": {
+      "width": 1280,
+      "height": 800,
+      "status": 200,
+      "title": "راهیاب",
+      "hasCanvas": false,
+      "bodyTextLen": 728,
+      "bodyTextHash": "e0e36bb9d7d0ebb79d6735cf7c6a76b921f0ea6f5647643b82a8ccfa22212d1a",
+      "bodyTextPrefix": "راهیاب ناوبری داخل ساختمان ویرایش نقشه ناوبری نقشه فعال کلینیک ت",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "pageErrors": [],
+      "screenshot": "/workspace/screenshots/app-builder-preview.png"
+    },
+    "mobile": {
+      "width": 390,
+      "height": 844,
+      "status": 200,
+      "title": "راهیاب",
+      "hasCanvas": false,
+      "bodyTextLen": 728,
+      "bodyTextHash": "e0e36bb9d7d0ebb79d6735cf7c6a76b921f0ea6f5647643b82a8ccfa22212d1a",
+      "bodyTextPrefix": "راهیاب ناوبری داخل ساختمان ویرایش نقشه ناوبری نقشه فعال کلینیک ت",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "pageErrors": [],
+      "screenshot": "/workspace/screenshots/app-builder-preview-mobile.png"
+    }
+  },
+  "brandWarnings": [],
+  "authWarnings": [],
+  "verdictFile": "/workspace/screenshots/app-builder-preview.json"
+}
