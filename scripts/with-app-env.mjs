@@ -111,6 +111,8 @@ function main(argv) {
     process.exit(2);
   }
   const env = mergeAppEnv(readAppEnv(projectRoot()), process.env);
+  // On Windows, node_modules/.bin shims are .cmd files — spawn() can't exec
+  // them directly without going through a shell (ENOENT otherwise).
   const child = spawn(command, args, {
     stdio: "inherit",
     env,

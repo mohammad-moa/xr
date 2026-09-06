@@ -51,6 +51,9 @@ export function NavigateView({ plan }: { plan: FloorPlan }) {
   const filteredAccRef = useRef(9.8);
   const lastStepRef = useRef(0);
   const motionAttachedRef = useRef(false);
+  const targetBearingRef = useRef(0);
+  const liveHeadingRef = useRef(0);
+  const hasCompassRef = useRef(false);
 
   const originNode = plan.nodes.find((n) => n.kind === "origin");
   const destinationNodes = plan.nodes.filter((n) => n.kind === "destination");
@@ -70,6 +73,9 @@ export function NavigateView({ plan }: { plan: FloorPlan }) {
   const targetBearing = traveler ? headingFor(traveler.from, traveler.to) : 0;
   const liveHeading = heading ?? simHeading;
   const arrowAngle = arrived ? 0 : signedDeg(targetBearing - liveHeading);
+  useEffect(() => { targetBearingRef.current = targetBearing; }, [targetBearing]);
+  useEffect(() => { liveHeadingRef.current = liveHeading; }, [liveHeading]);
+  useEffect(() => { hasCompassRef.current = heading !== null; }, [heading]);
 
   async function requestCompass() {
     const DOE = DeviceOrientationEvent as unknown as {
@@ -88,7 +94,7 @@ export function NavigateView({ plan }: { plan: FloorPlan }) {
     else if (typeof e.alpha === "number") setHeading(normDeg(360 - e.alpha));
   }
 
-  // شمارش قدم واقعی از روی شتاب‌سنج گوشی (devicemotion)
+  // شمارش قدم واقعی از روی شتاب‌سنج گوشی (devicemotion) — با جهت واقعی حرکت
   function onMotionHandler(e: DeviceMotionEvent) {
     const acc = e.accelerationIncludingGravity || e.acceleration;
     if (!acc || acc.x === null) return;
@@ -99,7 +105,16 @@ export function NavigateView({ plan }: { plan: FloorPlan }) {
     if (dynamic > STEP_THRESHOLD && now - lastStepRef.current > STEP_COOLDOWN_MS) {
       lastStepRef.current = now;
       setStepCount((c) => c + 1);
-      setTravelled((t) => Math.min(totalPxRef.current, t + STEP_LENGTH_M / plan.metersPerPixel));
+      // اگه قطب‌نمای واقعی گوشی متصل نیست (فقط شبیه‌ساز روی صفحه)، جهت واقعیِ
+      // بدنت رو نمی‌دونیم — پس فرض می‌کنیم هر قدم رو به جلوئه.
+      const diff = hasCompassRef.current
+        ? Math.abs(signedDeg(targetBearingRef.current - liveHeadingRef.current))
+        : 0;
+      const stepPx = STEP_LENGTH_M / plan.metersPerPixel;
+      const forward = diff <= 90; // هم‌جهت با مسیر
+      setTravelled((t) =>
+        Math.max(0, Math.min(totalPxRef.current, t + (forward ? stepPx : -stepPx))),
+      );
     }
   }
 
