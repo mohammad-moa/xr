@@ -1,15 +1,15 @@
 import { useEffect, useState } from "react";
-import { Compass, Map } from "lucide-react";
+import { Compass, Map, ScanLine } from "lucide-react";
 import { Toaster } from "sonner";
 import { EditView } from "@/components/edit-view";
-import { MapScaleCalibration } from "@/components/map-scale-calibration";
 import { NavigateView } from "@/components/navigate-view";
+import { QrArNav } from "@/components/qr-ar-nav";
 import { cn } from "@/lib/utils";
 import type { FloorPlan } from "@/lib/floorplan/types";
 import { samplePlan } from "@/lib/floorplan/sample";
 import { loadPlan, savePlan } from "@/lib/floorplan/storage";
 
-type Tab = "edit" | "navigate";
+type Tab = "edit" | "navigate" | "qr";
 
 export function AppHome() {
   const [tab, setTab] = useState<Tab>("edit");
@@ -17,14 +17,7 @@ export function AppHome() {
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
-    const loaded = loadPlan();
-    // Migrate the old demo scale once. After the admin calibrates the map,
-    // the saved value is kept and is never overwritten.
-    if (loaded.metersPerPixel === 0.024) {
-      setPlan(samplePlan());
-    } else {
-      setPlan(loaded);
-    }
+    setPlan(loadPlan());
     setReady(true);
   }, []);
 
@@ -32,6 +25,23 @@ export function AppHome() {
     if (!ready) return;
     savePlan(plan);
   }, [plan, ready]);
+
+  // فلوی «کاربر» (اسکن QR → AR واقعی) یه تجربه‌ی تمام‌صفحه و مستقله — بدون
+  // نوار بالا/تب‌های ادمین، دقیقاً همون چیزی که قراره کاربرِ نهایی ببینه.
+  if (tab === "qr") {
+    return (
+      <>
+        <button
+          type="button"
+          onClick={() => setTab("navigate")}
+          className="fixed left-3 top-[max(0.75rem,env(safe-area-inset-top))] z-30 rounded-full bg-black/40 px-3 py-1.5 text-xs text-white"
+        >
+          پنل ادمین
+        </button>
+        <QrArNav />
+      </>
+    );
+  }
 
   return (
     <div className="min-h-dvh bg-bg text-fg">
@@ -47,11 +57,12 @@ export function AppHome() {
             </div>
           </div>
         </div>
-        <nav className="mx-auto grid max-w-3xl grid-cols-2 px-3 sm:px-4" aria-label="بخش‌ها">
+        <nav className="mx-auto grid max-w-3xl grid-cols-3 px-3 sm:px-4" aria-label="بخش‌ها">
           {(
             [
-              { key: "edit", label: "ویرایش نقشه", icon: Map },
-              { key: "navigate", label: "ناوبری", icon: Compass },
+              { key: "edit", label: "ویرایش نقشه (ادمین)", icon: Map },
+              { key: "navigate", label: "ناوبری کامل", icon: Compass },
+              { key: "qr", label: "نسخه‌ی کاربر (QR)", icon: ScanLine },
             ] as const
           ).map(({ key, label, icon: Icon }) => {
             const active = tab === key;
@@ -79,14 +90,7 @@ export function AppHome() {
         </nav>
       </header>
 
-      {tab === "edit" ? (
-        <>
-          <EditView plan={plan} setPlan={setPlan} />
-          <MapScaleCalibration plan={plan} setPlan={setPlan} />
-        </>
-      ) : (
-        <NavigateView plan={plan} />
-      )}
+      {tab === "edit" ? <EditView plan={plan} setPlan={setPlan} /> : <NavigateView plan={plan} />}
 
       <Toaster
         position="bottom-center"
