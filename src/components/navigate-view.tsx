@@ -418,7 +418,7 @@ export function NavigateView({ plan }: { plan: FloorPlan }) {
             // چون خط مسیر برای این PoC به Plane Detection وابسته نیست.
             if (arNoPoseSinceRef.current === null) {
               arNoPoseSinceRef.current = performance.now();
-              setArHint("در حال راه‌اندازی موقعیت AR…");
+              setArHint("در حال دریافت موقعیت گوشی…");
             }
             return;
           }
@@ -429,25 +429,42 @@ export function NavigateView({ plan }: { plan: FloorPlan }) {
           if (!arStartWorldPosRef.current) {
             arStartWorldPosRef.current = { x: p.x, y: p.y, z: p.z };
 
+            // مبنای پیش‌فرض باعث می‌شود اگر بعضی نسخه‌های Chrome ماتریس
+            // view را کامل ندادند، موقعیت و مسیر متوقف نشوند.
+            arWorldBasisRef.current = {
+              eastX: 1,
+              eastZ: 0,
+              northX: 0,
+              northZ: -1,
+            };
+
             const m = pose.views[0]?.transform.inverse.matrix;
-            if (m) {
+            if (m && m.length >= 16) {
               const rightX = m[0];
               const rightZ = m[2];
               const forwardX = -m[8];
               const forwardZ = -m[10];
-              const rightLen = Math.hypot(rightX, rightZ) || 1;
-              const forwardLen = Math.hypot(forwardX, forwardZ) || 1;
+              const rightLen = Math.hypot(rightX, rightZ);
+              const forwardLen = Math.hypot(forwardX, forwardZ);
 
-              arWorldBasisRef.current = {
-                eastX: rightX / rightLen,
-                eastZ: rightZ / rightLen,
-                northX: forwardX / forwardLen,
-                northZ: forwardZ / forwardLen,
-              };
+              if (rightLen > 0.001 && forwardLen > 0.001) {
+                arWorldBasisRef.current = {
+                  eastX: rightX / rightLen,
+                  eastZ: rightZ / rightLen,
+                  northX: forwardX / forwardLen,
+                  northZ: forwardZ / forwardLen,
+                };
 
-              arStartHeadingRef.current = normDeg(
-                (Math.atan2(-forwardX / forwardLen, -forwardZ / forwardLen) * 180) / Math.PI,
-              );
+                arStartHeadingRef.current = normDeg(
+                  (Math.atan2(-forwardX / forwardLen, -forwardZ / forwardLen) * 180) / Math.PI,
+                );
+              }
+            }
+
+            // مبدأ AR همین حالا مشخص شده؛ پس UI دیگر نباید در حالت
+            // «در حال یافتن موقعیت» بماند.
+            if (originNode) {
+              setArPos({ x: originNode.x, y: originNode.y });
             }
 
             // خط رو فقط یه‌بار، همین که موقعیت شروع مشخص شد، می‌سازیم
@@ -464,7 +481,6 @@ export function NavigateView({ plan }: { plan: FloorPlan }) {
               line.gl.bufferData(line.gl.ARRAY_BUFFER, verts, line.gl.STATIC_DRAW);
               line.vertexCount = verts.length / 3;
             }
-            return;
           }
 
           // --- رسم خط روی زمین، هر فریم (برای اینکه ثابت روی کف بمونه) ---
@@ -497,9 +513,14 @@ export function NavigateView({ plan }: { plan: FloorPlan }) {
 
           const dx = p.x - arStartWorldPosRef.current.x;
           const dz = p.z - arStartWorldPosRef.current.z;
-          const basis = arWorldBasisRef.current;
+          const basis = arWorldBasisRef.current ?? {
+            eastX: 1,
+            eastZ: 0,
+            northX: 0,
+            northZ: -1,
+          };
 
-          if (originNode && basis) {
+          if (originNode) {
             const east = dx * basis.eastX + dz * basis.eastZ;
             const north = dx * basis.northX + dz * basis.northZ;
             setArPos({
