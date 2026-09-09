@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Compass, Map } from "lucide-react";
 import { Toaster } from "sonner";
 import { EditView } from "@/components/edit-view";
+import { MapScaleCalibration } from "@/components/map-scale-calibration";
 import { NavigateView } from "@/components/navigate-view";
 import { cn } from "@/lib/utils";
 import type { FloorPlan } from "@/lib/floorplan/types";
@@ -16,10 +17,13 @@ export function AppHome() {
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
-    setPlan(loadPlan());
-    const params = new URLSearchParams(window.location.search);
-    if (params.get("destination")) {
-      setTab("navigate");
+    const loaded = loadPlan();
+    // Migrate the old demo scale once. After the admin calibrates the map,
+    // the saved value is kept and is never overwritten.
+    if (loaded.metersPerPixel === 0.024) {
+      setPlan(samplePlan());
+    } else {
+      setPlan(loaded);
     }
     setReady(true);
   }, []);
@@ -75,7 +79,14 @@ export function AppHome() {
         </nav>
       </header>
 
-      {tab === "edit" ? <EditView plan={plan} setPlan={setPlan} /> : <NavigateView plan={plan} />}
+      {tab === "edit" ? (
+        <>
+          <EditView plan={plan} setPlan={setPlan} />
+          <MapScaleCalibration plan={plan} setPlan={setPlan} />
+        </>
+      ) : (
+        <NavigateView plan={plan} />
+      )}
 
       <Toaster
         position="bottom-center"

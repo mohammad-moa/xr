@@ -67,10 +67,10 @@ function buildFloorLineVertices(
   headingDeg: number,
   start: { x: number; y: number; z: number },
   metersPerPixel: number,
-  floorY: number,
   halfWidthM = 0.08,
 ): Float32Array {
   const theta = (headingDeg * Math.PI) / 180;
+  const floorY = 0; // local-floor already uses the floor as the vertical origin
   const toWorld = (n: { x: number; y: number }) => {
     const east = (n.x - origin.x) * metersPerPixel;
     const north = -(n.y - origin.y) * metersPerPixel;
@@ -205,6 +205,7 @@ export function NavigateView({ plan }: { plan: FloorPlan }) {
   const arSessionRef = useRef<XRSessionLike | null>(null);
   const arStartHeadingRef = useRef(0);
   const arStartWorldPosRef = useRef<{ x: number; y: number; z: number } | null>(null);
+  const arWorldBasisRef = useRef<{ eastX: number; eastZ: number; northX: number; northZ: number } | null>(null);
   const arNoPoseSinceRef = useRef<number | null>(null);
   const arOverlayRef = useRef<HTMLDivElement>(null);
   const arLastUpdateRef = useRef(0);
@@ -249,7 +250,6 @@ export function NavigateView({ plan }: { plan: FloorPlan }) {
   const arBearing = arRouteMetrics?.bearingDeg ?? 0;
   const arArrowAngle = signedDeg(arBearing - liveHeading);
   const arArrived = arRemainingM !== null && arRemainingM < 0.4;
-  const hasValidScale = Number.isFinite(plan.metersPerPixel) && plan.metersPerPixel > 0;
 
   async function requestCompass() {
     const DOE = DeviceOrientationEvent as unknown as {
@@ -373,7 +373,7 @@ export function NavigateView({ plan }: { plan: FloorPlan }) {
       };
 
       const session = await xr.requestSession("immersive-ar", {
-        requiredFeatures: ["local"],
+        requiredFeatures: ["local-floor"],
         optionalFeatures: arOverlayRef.current ? ["dom-overlay"] : [],
         ...(arOverlayRef.current ? { domOverlay: { root: arOverlayRef.current } } : {}),
       });
@@ -382,8 +382,6 @@ export function NavigateView({ plan }: { plan: FloorPlan }) {
       const XRWebGLLayerCtor = (window as unknown as { XRWebGLLayer: new (s: unknown, g: unknown) => unknown })
         .XRWebGLLayer;
       session.updateRenderState({ baseLayer: new XRWebGLLayerCtor(session, gl) });
-      // local-floor gives us a floor-relative coordinate system when the browser
-      // supports it. We fall back to local for browsers that do not.
       let refSpace: unknown;
       try {
         refSpace = await session.requestReferenceSpace("local-floor");
@@ -391,16 +389,13 @@ export function NavigateView({ plan }: { plan: FloorPlan }) {
         refSpace = await session.requestReferenceSpace("local");
       }
 
-      if (!hasValidScale) {
-        await session.end();
-        throw new Error("مقیاس واقعی نقشه تنظیم نشده است. ابتدا مقیاس نقشه را در پنل ادمین تعیین کنید.");
-      }
-
-      // The QR/map origin is our zero point. We deliberately do not use a hard-coded
-      // pixel-to-meter value here; the scale must come from the published floor plan.
-      arStartHeadingRef.current =
-        pathNodes.length > 1 ? headingFor(pathNodes[0], pathNodes[1]) : 0;
+      // کالیبراسیونِ جهت: به‌جای قطب‌نمای گوشی (که روی خیلی از گوشی‌ها ناپایدار و
+      // نادقیقه)، فرض می‌کنیم کاربر همین لحظه رو به همون طرفی ایستاده که قراره
+      // راه بره — یعنی جهتِ واقعیِ گوشی رو با جهتِ اولین پاره‌خطِ مسیر (روی
+      // نقشه) یکی در نظر می‌گیریم. این کاملاً از سنسور مغناطیسی مستقل و پایداره.
+      arStartHeadingRef.current = 0;
       arStartWorldPosRef.current = null;
+      arWorldBasisRef.current = null;
       arNoPoseSinceRef.current = null;
       setArHint(null);
       setArActive(true);
@@ -415,7 +410,7 @@ export function NavigateView({ plan }: { plan: FloorPlan }) {
             // یه‌کم جابه‌جاییِ واقعیِ گوشی داره، نه فقط چرخوندنش.
             if (arNoPoseSinceRef.current === null) arNoPoseSinceRef.current = performance.now();
             else if (performance.now() - arNoPoseSinceRef.current > 4000) {
-              setArHint("گوشی رو چند ثانیه آروم جابه‌جا کن (نه فقط بچرخون) تا ردیابی شروع بشه");
+              setArHint("در حال پیدا کردن سطح زمین…");
             }
             return;
           }
@@ -425,9 +420,28 @@ export function NavigateView({ plan }: { plan: FloorPlan }) {
 
           if (!arStartWorldPosRef.current) {
             arStartWorldPosRef.current = { x: p.x, y: p.y, z: p.z };
-            if (originNode) {
-              setArPos({ x: originNode.x, y: originNode.y });
+
+            const m = pose.views[0]?.transform.inverse.matrix;
+            if (m) {
+              const rightX = m[0];
+              const rightZ = m[2];
+              const forwardX = -m[8];
+              const forwardZ = -m[10];
+              const rightLen = Math.hypot(rightX, rightZ) || 1;
+              const forwardLen = Math.hypot(forwardX, forwardZ) || 1;
+
+              arWorldBasisRef.current = {
+                eastX: rightX / rightLen,
+                eastZ: rightZ / rightLen,
+                northX: forwardX / forwardLen,
+                northZ: forwardZ / forwardLen,
+              };
+
+              arStartHeadingRef.current = normDeg(
+                (Math.atan2(-forwardX / forwardLen, -forwardZ / forwardLen) * 180) / Math.PI,
+              );
             }
+
             // خط رو فقط یه‌بار، همین که موقعیت شروع مشخص شد، می‌سازیم
             if (originNode && pathNodes.length > 1 && glLineRef.current) {
               const verts = buildFloorLineVertices(
@@ -436,7 +450,6 @@ export function NavigateView({ plan }: { plan: FloorPlan }) {
                 arStartHeadingRef.current,
                 arStartWorldPosRef.current,
                 plan.metersPerPixel,
-                0,
               );
               const line = glLineRef.current;
               line.gl.bindBuffer(line.gl.ARRAY_BUFFER, line.vbo);
@@ -476,11 +489,11 @@ export function NavigateView({ plan }: { plan: FloorPlan }) {
 
           const dx = p.x - arStartWorldPosRef.current.x;
           const dz = p.z - arStartWorldPosRef.current.z;
-          const theta = (arStartHeadingRef.current * Math.PI) / 180;
-          // چرخوندن جابه‌جاییِ محلیِ AR به مختصات شمال/شرقِ نقشه، طبق جهتِ کالیبراسیونِ لحظه‌ی شروع (نه قطب‌نما)
-          const east = dx * Math.cos(theta) - dz * Math.sin(theta);
-          const north = -dx * Math.sin(theta) - dz * Math.cos(theta);
-          if (originNode) {
+          const basis = arWorldBasisRef.current;
+
+          if (originNode && basis) {
+            const east = dx * basis.eastX + dz * basis.eastZ;
+            const north = dx * basis.northX + dz * basis.northZ;
             setArPos({
               x: originNode.x + east / plan.metersPerPixel,
               y: originNode.y - north / plan.metersPerPixel,
@@ -496,6 +509,7 @@ export function NavigateView({ plan }: { plan: FloorPlan }) {
         setArPos(null);
         setArHint(null);
         arSessionRef.current = null;
+        arWorldBasisRef.current = null;
         glLineRef.current = null;
       });
     } catch (err) {
@@ -690,8 +704,8 @@ export function NavigateView({ plan }: { plan: FloorPlan }) {
           </Badge>
         </div>
 
-        <div className="absolute right-2 top-14 z-20 w-[140px] overflow-hidden rounded-xl bg-black/45 p-1 shadow-lg backdrop-blur-sm">
-          <div className="overflow-hidden rounded-lg">
+        <div className="absolute right-3 top-16 z-20 w-[135px] overflow-hidden rounded-2xl bg-black/45 p-1.5 shadow-lg backdrop-blur-sm">
+          <div className="overflow-hidden rounded-xl">
             <FloorCanvas
               plan={plan}
               path={pathNodes}
@@ -730,7 +744,8 @@ export function NavigateView({ plan }: { plan: FloorPlan }) {
         <div className="space-y-2">
           {arSupported && !arActive && (
             <p className="rounded-xl bg-amber-500/15 px-3 py-2 text-center text-xs text-nav-fg">
-              گوشی را در جهت شروع مسیر نگه دار تا خط روی کف با مسیر نقشه هم‌راستا شود.
+              مهم: قبل از زدنِ دکمه‌ی پایین، گوشی رو رو به همون طرفی بگیر که
+              قراره راه بری — جهت خط دقیقاً بر همین اساس محاسبه می‌شه.
             </p>
           )}
           {arSupported && (
@@ -740,7 +755,7 @@ export function NavigateView({ plan }: { plan: FloorPlan }) {
               onClick={arActive ? stopArSession : startArSession}
             >
               <Navigation />
-              {arActive ? "توقف AR" : "فعال‌سازی AR"}
+              {arActive ? "خاموش کردن AR واقعی" : "نمایش خط مسیر روی زمین (AR واقعی)"}
             </Button>
           )}
           {arError && (
