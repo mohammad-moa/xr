@@ -45,7 +45,7 @@ type XRFrameLike = {
     };
   };
   getViewerPose: (rs: unknown) => {
-    transform: { position: { x: number; y: number; z: number } };
+    transform: { position: { x: number; y: number; z: number }; matrix: Float32Array };
     views: Array<{ projectionMatrix: Float32Array; transform: { inverse: { matrix: Float32Array } } }>;
   } | null;
 };
@@ -76,20 +76,28 @@ function createLineProgram(gl: WebGLRenderingContext): WebGLProgram {
   return program;
 }
 
-/** یه نوارِ راستِ ساده، مستقیم رو به جلو (محور -Z محلیِ AR)، به‌اندازه‌ی distanceMeters. */
+/**
+ * یه نوارِ راست، به‌اندازه‌ی distanceMeters، رو به جهتِ واقعیِ گوشی در لحظه‌ای
+ * که ردیابی قفل شد (نه لحظه‌ی زدنِ دکمه — چون بینِ این دو، به‌خاطر تکون‌دادنِ
+ * گوشی برای فعال‌سازیِ ردیابی، جهتش عوض شده). forward باید یه بردارِ افقیِ
+ * یکه (طول ۱، فقط x/z) باشه.
+ */
 function buildStraightLineVertices(
   start: { x: number; y: number; z: number },
+  forward: { x: number; z: number },
   distanceMeters: number,
   halfWidthM = 0.09,
 ): Float32Array {
   const floorY = start.y - 1.2;
   const a = { x: start.x, y: floorY, z: start.z };
-  const b = { x: start.x, y: floorY, z: start.z - distanceMeters };
-  const perpX = halfWidthM; // چون جهت همیشه (0,0,-1) ثابته، عمودش (±halfWidth,0,0) می‌شه
-  const a1 = [a.x - perpX, a.y, a.z];
-  const a2 = [a.x + perpX, a.y, a.z];
-  const b1 = [b.x - perpX, b.y, b.z];
-  const b2 = [b.x + perpX, b.y, b.z];
+  const b = { x: start.x + forward.x * distanceMeters, y: floorY, z: start.z + forward.z * distanceMeters };
+  // عمود بر جهتِ حرکت، توی صفحه‌ی افقی (چرخشِ ۹۰ درجه‌ی بردار جلو)
+  const perpX = -forward.z * halfWidthM;
+  const perpZ = forward.x * halfWidthM;
+  const a1 = [a.x - perpX, a.y, a.z - perpZ];
+  const a2 = [a.x + perpX, a.y, a.z + perpZ];
+  const b1 = [b.x - perpX, b.y, b.z - perpZ];
+  const b2 = [b.x + perpX, b.y, b.z + perpZ];
   return new Float32Array([...a1, ...a2, ...b1, ...a2, ...b2, ...b1]);
 }
 
@@ -344,6 +352,7 @@ function ArWalkScreen({ destination, onExit }: { destination: QrDestination; onE
   const [started, setStarted] = useState(false);
   const sessionRef = useRef<XRSessionLike | null>(null);
   const startPosRef = useRef<{ x: number; y: number; z: number } | null>(null);
+  const startForwardRef = useRef<{ x: number; z: number } | null>(null);
   const noPoseSinceRef = useRef<number | null>(null);
   const lastUpdateRef = useRef(0);
   const lineRef = useRef<{
@@ -407,6 +416,7 @@ function ArWalkScreen({ destination, onExit }: { destination: QrDestination; onE
       const refSpace = await session.requestReferenceSpace("local");
 
       startPosRef.current = null;
+      startForwardRef.current = null;
       noPoseSinceRef.current = null;
       setArHint(null);
       setRemainingM(null);
@@ -417,9 +427,12 @@ function ArWalkScreen({ destination, onExit }: { destination: QrDestination; onE
           const f = frame as XRFrameLike;
           const pose = f.getViewerPose(refSpace);
           if (!pose) {
-            if (noPoseSinceRef.current === null) noPoseSinceRef.current = performance.now();
-            else if (performance.now() - noPoseSinceRef.current > 4000) {
-              setArHint("گوشی رو چند ثانیه آروم جابه‌جا کن (نه فقط بچرخون) تا ردیابی شروع بشه");
+            if (noPoseSinceRef.current === null) {
+              noPoseSinceRef.current = performance.now();
+              // از همون لحظه‌ی اول راهنما رو نشون بده، منتظر گیرکردن نمون
+              setArHint("گوشی رو آروم و پیوسته تکون بده (نه بچرخون)، رو به یه‌جای روشن و پرجزئیات — چند ثانیه طول می‌کشه");
+            } else if (performance.now() - noPoseSinceRef.current > 8000) {
+              setArHint("هنوز ردیابی پیدا نشد — نور محیط رو بیشتر کن یا رو به یه سطحِ دیگه (نه دیوارِ خالی/براق) بگیر");
             }
             return;
           }
@@ -429,9 +442,19 @@ function ArWalkScreen({ destination, onExit }: { destination: QrDestination; onE
 
           if (!startPosRef.current) {
             startPosRef.current = { x: p.x, y: p.y, z: p.z };
+            // جهتِ واقعیِ «جلو»ی گوشی رو همین الان (نه لحظه‌ی زدنِ دکمه) از
+            // ماتریسِ pose می‌گیریم — چون تا همین‌جا، برای فعال‌سازیِ ردیابی
+            // گوشی رو تکون دادی و جهتش عوض شده. ستونِ سومِ ماتریس (اندیس‌های
+            // ۸،۹،۱۰) محورِ Z محلیِ گوشیه؛ جلو = منفیِ همون، روی صفحه‌ی افقی.
+            const m = pose.transform.matrix;
+            const fx = -m[8];
+            const fz = -m[10];
+            const len = Math.hypot(fx, fz) || 1;
+            startForwardRef.current = { x: fx / len, z: fz / len };
+
             const line = lineRef.current;
             if (line) {
-              const verts = buildStraightLineVertices(startPosRef.current, destination.distanceMeters);
+              const verts = buildStraightLineVertices(startPosRef.current, startForwardRef.current, destination.distanceMeters);
               line.gl.bindBuffer(line.gl.ARRAY_BUFFER, line.vbo);
               line.gl.bufferData(line.gl.ARRAY_BUFFER, verts, line.gl.STATIC_DRAW);
               line.vertexCount = verts.length / 3;
@@ -467,7 +490,9 @@ function ArWalkScreen({ destination, onExit }: { destination: QrDestination; onE
           lastUpdateRef.current = now;
 
           // جلو = محور -Z محلی؛ هرچی جلوتر بری، z کوچیک‌تر (منفی‌تر) می‌شه
-          const progress = -(p.z - startPosRef.current.z);
+          // پیشرفت = فاصله‌ای که واقعاً توی همون جهتِ «جلو»ی کالیبره‌شده جلو رفتی
+          const fwd = startForwardRef.current ?? { x: 0, z: -1 };
+          const progress = (p.x - startPosRef.current.x) * fwd.x + (p.z - startPosRef.current.z) * fwd.z;
           setRemainingM(Math.max(0, destination.distanceMeters - progress));
         } catch (err) {
           setArError((prev) => prev ?? (err instanceof Error ? `خطای رندر: ${err.message}` : "خطای نامشخص"));
