@@ -373,8 +373,15 @@ export function NavigateView({ plan }: { plan: FloorPlan }) {
       };
 
       const session = await xr.requestSession("immersive-ar", {
-        requiredFeatures: ["local-floor"],
-        optionalFeatures: arOverlayRef.current ? ["dom-overlay"] : [],
+        // برای PoC نباید شروع AR را به تشخیص سطح زمین وابسته کنیم.
+        // بعضی گوشی‌ها/نسخه‌های Chrome با local-floor دیر یا اصلاً وارد این
+        // حالت نمی‌شوند. اگر پشتیبانی شود، پایین‌تر از local-floor استفاده می‌کنیم.
+        requiredFeatures: [],
+        optionalFeatures: [
+          "local-floor",
+          "local",
+          ...(arOverlayRef.current ? ["dom-overlay"] : []),
+        ],
         ...(arOverlayRef.current ? { domOverlay: { root: arOverlayRef.current } } : {}),
       });
       arSessionRef.current = session;
@@ -406,11 +413,12 @@ export function NavigateView({ plan }: { plan: FloorPlan }) {
           const f = frame as XRFrameLike;
           const pose = f.getViewerPose(refSpace);
           if (!pose) {
-            // معمولاً یعنی ARCore هنوز نتونسته ردیابی رو شروع کنه — نیاز به
-            // یه‌کم جابه‌جاییِ واقعیِ گوشی داره، نه فقط چرخوندنش.
-            if (arNoPoseSinceRef.current === null) arNoPoseSinceRef.current = performance.now();
-            else if (performance.now() - arNoPoseSinceRef.current > 4000) {
-              setArHint("در حال پیدا کردن سطح زمین…");
+            // تا وقتی اولین pose از ARCore نرسیده، فقط صبر می‌کنیم.
+            // اینجا نباید پیام «در حال پیدا کردن سطح زمین» نشان داده شود؛
+            // چون خط مسیر برای این PoC به Plane Detection وابسته نیست.
+            if (arNoPoseSinceRef.current === null) {
+              arNoPoseSinceRef.current = performance.now();
+              setArHint("در حال راه‌اندازی موقعیت AR…");
             }
             return;
           }
