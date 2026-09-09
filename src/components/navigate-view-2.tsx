@@ -13,7 +13,149 @@ import {
   normDeg,
 } from "@/lib/floorplan/pathfinding";
 
+type XRFrameLike = {
+  session: {
+    renderState: {
+      baseLayer: {
+        framebuffer: WebGLFramebuffer;
+        getViewport: (v: unknown) => { x: number; y: number; width: number; height: number };
+      };
+    };
+  };
+  getViewerPose: (rs: unknown) => {
+    transform: { position: { x: number; y: number; z: number } };
+    views: Array<{ projectionMatrix: Float32Array; transform: { inverse: { matrix: Float32Array } } }>;
+  } | null;
+};
+
+/** ضرب دو ماتریس ۴×۴ ستون‌محور (همون قراردادی که WebGL/WebXR استفاده می‌کنن). */
+function mat4Multiply(a: Float32Array, b: Float32Array): Float32Array {
+  const out = new Float32Array(16);
+  for (let col = 0; col < 4; col++) {
+    for (let row = 0; row < 4; row++) {
+      let sum = 0;
+      for (let k = 0; k < 4; k++) sum += a[k * 4 + row] * b[col * 4 + k];
+      out[col * 4 + row] = sum;
+    }
+  }
+  return out;
+}
+
+/** یه شِیدرِ خیلی ساده فقط برای رنگ‌کردنِ خط — بدون هیچ نور/بافت. */
+function createLineProgram(gl: WebGLRenderingContext): WebGLProgram {
+  const vs = gl.createShader(gl.VERTEX_SHADER)!;
+  gl.shaderSource(vs, "attribute vec3 aPos; uniform mat4 uMVP; void main(){ gl_Position = uMVP * vec4(aPos, 1.0); }");
+  gl.compileShader(vs);
+  const fs = gl.createShader(gl.FRAGMENT_SHADER)!;
+  gl.shaderSource(fs, "precision mediump float; uniform vec4 uColor; void main(){ gl_FragColor = uColor; }");
+  gl.compileShader(fs);
+  const program = gl.createProgram()!;
+  gl.attachShader(program, vs);
+  gl.attachShader(program, fs);
+  gl.linkProgram(program);
+  return program;
+}
+
+/**
+ * مسیر (نودهای پیکسلی نقشه) رو به یه نوارِ سه‌بعدیِ روی زمین تبدیل می‌کنه —
+ * دقیقاً همون خطی که قراره روی کف واقعی «چسبیده» به نظر برسه. هر پاره‌خط رو
+ * به یه مستطیل نازک (دو مثلث) با پهنای ثابت تبدیل می‌کنه.
+ */
+function buildFloorLineVertices(
+  path: MapNode[],
+  origin: MapNode,
+  headingDeg: number,
+  start: { x: number; y: number; z: number },
+  metersPerPixel: number,
+  halfWidthM = 0.08,
+): Float32Array {
+  const theta = (headingDeg * Math.PI) / 180;
+  const floorY = start.y - 1.2; // فرض: گوشی حدوداً ۱.۲ متر بالاتر از کف نگه داشته می‌شه
+  const toWorld = (n: { x: number; y: number }) => {
+    const east = (n.x - origin.x) * metersPerPixel;
+    const north = -(n.y - origin.y) * metersPerPixel;
+    const dx = east * Math.cos(theta) - north * Math.sin(theta);
+    const dz = -(east * Math.sin(theta) + north * Math.cos(theta));
+    return { x: start.x + dx, y: floorY, z: start.z + dz };
+  };
+  const pts = path.map(toWorld);
+  const verts: number[] = [];
+  for (let i = 0; i < pts.length - 1; i++) {
+    const a = pts[i];
+    const b = pts[i + 1];
+    let dirX = b.x - a.x;
+    let dirZ = b.z - a.z;
+    const len = Math.hypot(dirX, dirZ) || 1;
+    dirX /= len;
+    dirZ /= len;
+    const perpX = -dirZ * halfWidthM;
+    const perpZ = dirX * halfWidthM;
+    const a1 = [a.x - perpX, a.y, a.z - perpZ];
+    const a2 = [a.x + perpX, a.y, a.z + perpZ];
+    const b1 = [b.x - perpX, b.y, b.z - perpZ];
+    const b2 = [b.x + perpX, b.y, b.z + perpZ];
+    verts.push(...a1, ...a2, ...b1, ...a2, ...b2, ...b1);
+  }
+  return new Float32Array(verts);
+}
+
+function routeMetricsAtPoint(
+  path: MapNode[],
+  point: { x: number; y: number },
+) {
+  if (path.length < 2) {
+    return { remainingPx: 0, bearingDeg: 0 };
+  }
+
+  const totalPx = pathLengthPx(path);
+  let bestDistanceSq = Number.POSITIVE_INFINITY;
+  let bestTravelledPx = 0;
+  let bestBearingDeg = headingFor(path[0], path[1]);
+  let cumulativePx = 0;
+
+  for (let i = 0; i < path.length - 1; i++) {
+    const a = path[i];
+    const b = path[i + 1];
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const lenSq = dx * dx + dy * dy;
+    const len = Math.sqrt(lenSq);
+
+    if (len === 0) continue;
+
+    const t = Math.max(
+      0,
+      Math.min(1, ((point.x - a.x) * dx + (point.y - a.y) * dy) / lenSq),
+    );
+    const px = a.x + dx * t;
+    const py = a.y + dy * t;
+    const distanceSq = (point.x - px) ** 2 + (point.y - py) ** 2;
+
+    if (distanceSq < bestDistanceSq) {
+      bestDistanceSq = distanceSq;
+      bestTravelledPx = cumulativePx + len * t;
+      bestBearingDeg = headingFor(a, b);
+    }
+
+    cumulativePx += len;
+  }
+
+  return {
+    remainingPx: Math.max(0, totalPx - bestTravelledPx),
+    bearingDeg: bestBearingDeg,
+  };
+}
+
 type Phase = "pick" | "preview" | "guide";
+
+/** حداقل شکلی از XRSession که استفاده می‌کنیم — کتابخانه‌ی نوع WebXR رسمی توی این پروژه نصب نیست. */
+type XRSessionLike = {
+  end: () => Promise<void>;
+  requestAnimationFrame: (cb: (t: number, frame: unknown) => number | void) => number;
+  updateRenderState: (state: Record<string, unknown>) => void;
+  requestReferenceSpace: (type: string) => Promise<unknown>;
+  addEventListener: (type: string, cb: () => void) => void;
+};
 
 const STEP_LENGTH_M = 0.75; // میانگین طول قدم — قابل کالیبره‌کردن
 const STEP_THRESHOLD = 1.6; // آستانه‌ی شتاب برای تشخیص قدم — روی گوشی واقعی تنظیم کن
@@ -54,6 +196,27 @@ export function NavigateView({ plan }: { plan: FloorPlan }) {
   const targetBearingRef = useRef(0);
   const liveHeadingRef = useRef(0);
   const hasCompassRef = useRef(false);
+  // --- AR واقعی (WebXR / ARCore — فقط Chrome روی اندروید) ---
+  const [arSupported, setArSupported] = useState<boolean | null>(null);
+  const [arActive, setArActive] = useState(false);
+  const [arError, setArError] = useState<string | null>(null);
+  const [arHint, setArHint] = useState<string | null>(null);
+  const [arPos, setArPos] = useState<{ x: number; y: number } | null>(null);
+  const arSessionRef = useRef<XRSessionLike | null>(null);
+  const arStartHeadingRef = useRef(0);
+  const arStartWorldPosRef = useRef<{ x: number; y: number; z: number } | null>(null);
+  const arNoPoseSinceRef = useRef<number | null>(null);
+  const arOverlayRef = useRef<HTMLDivElement>(null);
+  const arLastUpdateRef = useRef(0);
+  const glLineRef = useRef<{
+    gl: WebGLRenderingContext;
+    program: WebGLProgram;
+    posLoc: number;
+    mvpLoc: WebGLUniformLocation | null;
+    colorLoc: WebGLUniformLocation | null;
+    vbo: WebGLBuffer | null;
+    vertexCount: number;
+  } | null>(null);
 
   const originNode = plan.nodes.find((n) => n.kind === "origin");
   const destinationNodes = plan.nodes.filter((n) => n.kind === "destination");
@@ -76,6 +239,16 @@ export function NavigateView({ plan }: { plan: FloorPlan }) {
   useEffect(() => { targetBearingRef.current = targetBearing; }, [targetBearing]);
   useEffect(() => { liveHeadingRef.current = liveHeading; }, [liveHeading]);
   useEffect(() => { hasCompassRef.current = heading !== null; }, [heading]);
+
+  // در AR واقعی، فاصله و جهت را نسبت به نزدیک‌ترین نقطه روی مسیر حساب می‌کنیم
+  // تا مسیر راهرو حفظ شود و فاصله، خط مستقیم تا مقصد نباشد.
+  const arRouteMetrics = arActive && arPos ? routeMetricsAtPoint(pathNodes, arPos) : null;
+  const arRemainingM = arRouteMetrics
+    ? arRouteMetrics.remainingPx * plan.metersPerPixel
+    : null;
+  const arBearing = arRouteMetrics?.bearingDeg ?? 0;
+  const arArrowAngle = signedDeg(arBearing - liveHeading);
+  const arArrived = arRemainingM !== null && arRemainingM < 0.4;
 
   async function requestCompass() {
     const DOE = DeviceOrientationEvent as unknown as {
@@ -149,12 +322,175 @@ export function NavigateView({ plan }: { plan: FloorPlan }) {
       motionAttachedRef.current = true;
       setMotionActive(true);
     }
+    // فقط Chrome روی اندروید (ARCore) به immersive-ar جواب مثبت می‌ده
+    const xr = (navigator as unknown as { xr?: { isSessionSupported: (m: string) => Promise<boolean> } }).xr;
+    if (xr?.isSessionSupported) {
+      xr.isSessionSupported("immersive-ar").then(setArSupported).catch(() => setArSupported(false));
+    } else {
+      setArSupported(false);
+    }
     return () => {
       window.removeEventListener("deviceorientation", onOrientHandler, true);
       window.removeEventListener("devicemotion", onMotionHandler, true);
+      arSessionRef.current?.end().catch(() => {});
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  /**
+   * روشن‌کردن AR واقعی: یه session خام WebXR می‌گیریم و مسیر رو به‌صورت یه
+   * نوارِ سبزِ نیمه‌شفاف، مستقیم روی فریم‌بافرِ دوربین (بدون three.js، فقط
+   * WebGL خام) رسم می‌کنیم — طوری که انگار واقعاً روی زمین چسبیده. هم‌زمان،
+   * موقعیت واقعیِ گوشی رو هم برای فاصله/فلشِ بالای صفحه حساب می‌کنیم.
+   */
+  async function startArSession() {
+    setArError(null);
+    const xr = (navigator as unknown as {
+      xr?: { requestSession: (mode: string, opts: Record<string, unknown>) => Promise<XRSessionLike> };
+    }).xr;
+    if (!xr) {
+      setArError("این مرورگر از AR واقعی پشتیبانی نمی‌کند.");
+      return;
+    }
+    try {
+      const canvas = document.createElement("canvas");
+      const gl = canvas.getContext("webgl", { xrCompatible: true }) as (WebGLRenderingContext & {
+        makeXRCompatible?: () => Promise<void>;
+      }) | null;
+      if (!gl) throw new Error("no-webgl");
+      if (gl.makeXRCompatible) await gl.makeXRCompatible();
+
+      const program = createLineProgram(gl);
+      glLineRef.current = {
+        gl,
+        program,
+        posLoc: gl.getAttribLocation(program, "aPos"),
+        mvpLoc: gl.getUniformLocation(program, "uMVP"),
+        colorLoc: gl.getUniformLocation(program, "uColor"),
+        vbo: gl.createBuffer(),
+        vertexCount: 0,
+      };
+
+      const session = await xr.requestSession("immersive-ar", {
+        requiredFeatures: ["local"],
+        optionalFeatures: arOverlayRef.current ? ["dom-overlay"] : [],
+        ...(arOverlayRef.current ? { domOverlay: { root: arOverlayRef.current } } : {}),
+      });
+      arSessionRef.current = session;
+
+      const XRWebGLLayerCtor = (window as unknown as { XRWebGLLayer: new (s: unknown, g: unknown) => unknown })
+        .XRWebGLLayer;
+      session.updateRenderState({ baseLayer: new XRWebGLLayerCtor(session, gl) });
+      const refSpace = await session.requestReferenceSpace("local");
+
+      // کالیبراسیونِ جهت: به‌جای قطب‌نمای گوشی (که روی خیلی از گوشی‌ها ناپایدار و
+      // نادقیقه)، فرض می‌کنیم کاربر همین لحظه رو به همون طرفی ایستاده که قراره
+      // راه بره — یعنی جهتِ واقعیِ گوشی رو با جهتِ اولین پاره‌خطِ مسیر (روی
+      // نقشه) یکی در نظر می‌گیریم. این کاملاً از سنسور مغناطیسی مستقل و پایداره.
+      arStartHeadingRef.current =
+        pathNodes.length > 1 ? headingFor(pathNodes[0], pathNodes[1]) : 0;
+      arStartWorldPosRef.current = null;
+      arNoPoseSinceRef.current = null;
+      setArHint(null);
+      setArActive(true);
+
+      const onXRFrame = (_t: number, frame: unknown) => {
+        session.requestAnimationFrame(onXRFrame);
+        try {
+          const f = frame as XRFrameLike;
+          const pose = f.getViewerPose(refSpace);
+          if (!pose) {
+            // معمولاً یعنی ARCore هنوز نتونسته ردیابی رو شروع کنه — نیاز به
+            // یه‌کم جابه‌جاییِ واقعیِ گوشی داره، نه فقط چرخوندنش.
+            if (arNoPoseSinceRef.current === null) arNoPoseSinceRef.current = performance.now();
+            else if (performance.now() - arNoPoseSinceRef.current > 4000) {
+              setArHint("گوشی رو چند ثانیه آروم جابه‌جا کن (نه فقط بچرخون) تا ردیابی شروع بشه");
+            }
+            return;
+          }
+          arNoPoseSinceRef.current = null;
+          setArHint(null);
+          const p = pose.transform.position;
+
+          if (!arStartWorldPosRef.current) {
+            arStartWorldPosRef.current = { x: p.x, y: p.y, z: p.z };
+            // خط رو فقط یه‌بار، همین که موقعیت شروع مشخص شد، می‌سازیم
+            if (originNode && pathNodes.length > 1 && glLineRef.current) {
+              const verts = buildFloorLineVertices(
+                pathNodes,
+                originNode,
+                arStartHeadingRef.current,
+                arStartWorldPosRef.current,
+                plan.metersPerPixel,
+              );
+              const line = glLineRef.current;
+              line.gl.bindBuffer(line.gl.ARRAY_BUFFER, line.vbo);
+              line.gl.bufferData(line.gl.ARRAY_BUFFER, verts, line.gl.STATIC_DRAW);
+              line.vertexCount = verts.length / 3;
+            }
+            return;
+          }
+
+          // --- رسم خط روی زمین، هر فریم (برای اینکه ثابت روی کف بمونه) ---
+          const line = glLineRef.current;
+          const baseLayer = f.session.renderState.baseLayer;
+          if (line && baseLayer && line.vertexCount > 0) {
+            const { gl: lgl, program: lprog, posLoc, mvpLoc, colorLoc, vbo } = line;
+            lgl.bindFramebuffer(lgl.FRAMEBUFFER, baseLayer.framebuffer);
+            lgl.clearColor(0, 0, 0, 0);
+            lgl.clear(lgl.COLOR_BUFFER_BIT | lgl.DEPTH_BUFFER_BIT);
+            lgl.enable(lgl.BLEND);
+            lgl.blendFunc(lgl.SRC_ALPHA, lgl.ONE_MINUS_SRC_ALPHA);
+            lgl.useProgram(lprog);
+            lgl.bindBuffer(lgl.ARRAY_BUFFER, vbo);
+            lgl.enableVertexAttribArray(posLoc);
+            lgl.vertexAttribPointer(posLoc, 3, lgl.FLOAT, false, 0, 0);
+            lgl.uniform4f(colorLoc, 0.16, 0.85, 0.55, 0.9); // سبزِ نیمه‌شفاف، مثل خط ناوبری گوگل‌مپس
+            for (const view of pose.views) {
+              const vp = baseLayer.getViewport(view);
+              lgl.viewport(vp.x, vp.y, vp.width, vp.height);
+              const mvp = mat4Multiply(view.projectionMatrix, view.transform.inverse.matrix);
+              lgl.uniformMatrix4fv(mvpLoc, false, mvp);
+              lgl.drawArrays(lgl.TRIANGLES, 0, line.vertexCount);
+            }
+          }
+
+          const now = performance.now();
+          if (now - arLastUpdateRef.current < 100) return; // ~۱۰ بار در ثانیه برای آپدیت UI کافیه
+          arLastUpdateRef.current = now;
+
+          const dx = p.x - arStartWorldPosRef.current.x;
+          const dz = p.z - arStartWorldPosRef.current.z;
+          const theta = (arStartHeadingRef.current * Math.PI) / 180;
+          // چرخوندن جابه‌جاییِ محلیِ AR به مختصات شمال/شرقِ نقشه، طبق جهتِ کالیبراسیونِ لحظه‌ی شروع (نه قطب‌نما)
+          const east = dx * Math.cos(theta) - dz * Math.sin(theta);
+          const north = -dx * Math.sin(theta) - dz * Math.cos(theta);
+          if (originNode) {
+            setArPos({
+              x: originNode.x + east / plan.metersPerPixel,
+              y: originNode.y - north / plan.metersPerPixel,
+            });
+          }
+        } catch (err) {
+          setArError((prev) => prev ?? (err instanceof Error ? `خطای رندر AR: ${err.message}` : "خطای نامشخص در رندر AR"));
+        }
+      };
+      session.requestAnimationFrame(onXRFrame);
+      session.addEventListener("end", () => {
+        setArActive(false);
+        setArPos(null);
+        setArHint(null);
+        arSessionRef.current = null;
+        glLineRef.current = null;
+      });
+    } catch (err) {
+      setArError(err instanceof Error ? err.message : "شروع AR واقعی ناموفق بود.");
+    }
+  }
+
+  function stopArSession() {
+    arSessionRef.current?.end().catch(() => {});
+  }
 
   useEffect(() => {
     return () => {
@@ -320,7 +656,10 @@ export function NavigateView({ plan }: { plan: FloorPlan }) {
         style={{ opacity: camReady ? 1 : 0 }}
       />
 
-      <div className="relative z-10 mx-auto flex min-h-[calc(100dvh-3.5rem)] w-full max-w-3xl flex-col justify-between gap-3 p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
+      <div
+        ref={arOverlayRef}
+        className="relative z-10 mx-auto flex min-h-[calc(100dvh-3.5rem)] w-full max-w-3xl flex-col justify-between gap-3 p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]"
+      >
         <div className="flex items-center justify-between gap-2">
           <Button
             variant="secondary"
@@ -332,16 +671,16 @@ export function NavigateView({ plan }: { plan: FloorPlan }) {
             خروج
           </Button>
           <Badge variant="muted" className="bg-nav-fg/12 text-nav-fg">
-            {camReady ? "دوربین فعال" : "پیش‌نمایش مسیر"}
+            {arActive ? "AR واقعی فعال" : camReady ? "دوربین فعال" : "پیش‌نمایش مسیر"}
           </Badge>
         </div>
 
-        <div className="overflow-hidden rounded-2xl bg-nav-fg/6 p-1.5">
+        <div className="absolute right-3 top-16 z-20 w-[190px] overflow-hidden rounded-2xl bg-black/45 p-1.5 shadow-lg backdrop-blur-sm">
           <div className="overflow-hidden rounded-xl">
             <FloorCanvas
               plan={plan}
               path={pathNodes}
-              travelledPx={travelled}
+              travelledPx={arActive && arPos ? undefined : travelled}
               interactive={false}
             />
           </div>
@@ -349,35 +688,75 @@ export function NavigateView({ plan }: { plan: FloorPlan }) {
 
         <div className="flex flex-col items-center text-center">
           <p className="text-4xl font-semibold tabular-nums tracking-tight">
-            {arrived ? "رسیدید" : `${remainingM.toFixed(0)} m`}
+            {arActive
+              ? arArrived
+                ? "رسیدید"
+                : arRemainingM !== null
+                  ? `${arRemainingM.toFixed(0)} m`
+                  : "در حال یافتن موقعیت..."
+              : arrived
+                ? "رسیدید"
+                : `${remainingM.toFixed(0)} m`}
           </p>
-          <GuideArrow angle={arrowAngle} />
+          <GuideArrow angle={arActive ? arArrowAngle : arrowAngle} />
           <p className="mt-1 rounded-full bg-nav-fg/12 px-3 py-1 text-xs tabular-nums">
-            {arrived
-              ? `به ${destination?.name ?? ""} رسیدید`
-              : heading === null
-                ? `شبیه‌ساز قطب‌نما · بخش ${traveler?.legIndex ?? 0}/${Math.max(1, pathNodes.length - 1)}`
-                : `بخش ${traveler?.legIndex ?? 0}/${Math.max(1, pathNodes.length - 1)}`}
+            {arActive
+              ? arArrived
+                ? `به ${destination?.name ?? ""} رسیدید`
+                : "موقعیت واقعی (ARCore)"
+              : arrived
+                ? `به ${destination?.name ?? ""} رسیدید`
+                : heading === null
+                  ? `شبیه‌ساز قطب‌نما · بخش ${traveler?.legIndex ?? 0}/${Math.max(1, pathNodes.length - 1)}`
+                  : `بخش ${traveler?.legIndex ?? 0}/${Math.max(1, pathNodes.length - 1)}`}
           </p>
         </div>
 
         <div className="space-y-2">
-          <div className="grid grid-cols-2 gap-2">
+          {arSupported && !arActive && (
+            <p className="rounded-xl bg-amber-500/15 px-3 py-2 text-center text-xs text-nav-fg">
+              مهم: قبل از زدنِ دکمه‌ی پایین، گوشی رو رو به همون طرفی بگیر که
+              قراره راه بری — جهت خط دقیقاً بر همین اساس محاسبه می‌شه.
+            </p>
+          )}
+          {arSupported && (
             <Button
               variant="secondary"
-              className="bg-nav-fg/12 text-nav-fg shadow-none hover:bg-nav-fg/18"
-              onClick={() => setWalking((w) => !w)}
-              disabled={arrived}
+              className={`w-full shadow-none ${arActive ? "bg-red-500/80 text-white hover:bg-red-500" : "bg-nav-fg/12 text-nav-fg hover:bg-nav-fg/18"}`}
+              onClick={arActive ? stopArSession : startArSession}
             >
-              {walking ? <Pause /> : <Play />}
-              {walking ? "توقف شبیه‌سازی" : "شبیه‌سازی حرکت"}
+              <Navigation />
+              {arActive ? "خاموش کردن AR واقعی" : "نمایش خط مسیر روی زمین (AR واقعی)"}
             </Button>
-            <div className="flex items-center justify-center gap-2 rounded-2xl bg-nav-fg/12 px-3 text-xs">
-              <Footprints className="size-4 shrink-0" />
-              {motionActive ? `${stepCount} قدم واقعی` : "قدم‌شمار غیرفعال"}
+          )}
+          {arError && (
+            <p className="rounded-xl bg-nav-fg/10 px-3 py-2 text-center text-xs text-nav-fg/80">
+              {arError}
+            </p>
+          )}
+          {arHint && (
+            <p className="rounded-xl bg-amber-500/20 px-3 py-2 text-center text-xs text-nav-fg">
+              {arHint}
+            </p>
+          )}
+          {!arActive && (
+            <div className="grid grid-cols-2 gap-2">
+              <Button
+                variant="secondary"
+                className="bg-nav-fg/12 text-nav-fg shadow-none hover:bg-nav-fg/18"
+                onClick={() => setWalking((w) => !w)}
+                disabled={arrived}
+              >
+                {walking ? <Pause /> : <Play />}
+                {walking ? "توقف شبیه‌سازی" : "شبیه‌سازی حرکت"}
+              </Button>
+              <div className="flex items-center justify-center gap-2 rounded-2xl bg-nav-fg/12 px-3 text-xs">
+                <Footprints className="size-4 shrink-0" />
+                {motionActive ? `${stepCount} قدم واقعی` : "قدم‌شمار غیرفعال"}
+              </div>
             </div>
-          </div>
-          {!motionActive && (
+          )}
+          {!motionActive && !arActive && (
             <Button
               variant="secondary"
               className="w-full bg-nav-fg/12 text-nav-fg shadow-none hover:bg-nav-fg/18"
@@ -392,7 +771,7 @@ export function NavigateView({ plan }: { plan: FloorPlan }) {
               {sensorError}
             </p>
           )}
-          {heading === null && (
+          {heading === null && !arActive && (
             <label className="flex items-center gap-3 rounded-xl bg-nav-fg/10 px-3 py-2 text-xs">
               <Compass className="size-4 shrink-0" />
               <span className="w-16 tabular-nums">{Math.round(simHeading)}°</span>
