@@ -17,6 +17,10 @@ export function AppHome() {
 
   useEffect(() => {
     setPlan(loadPlan());
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("destination")) {
+      setTab("navigate");
+    }
     setReady(true);
   }, []);
 

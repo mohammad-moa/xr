@@ -175,6 +175,17 @@ function GuideArrow({ angle }: { angle: number }) {
 }
 
 export function NavigateView({ plan }: { plan: FloorPlan }) {
+  // QR codes can open the app with ?source=<nodeId>&destination=<nodeId>.
+  // Keep the manual picker as a fallback when the URL does not contain valid IDs.
+  const qrParams = useMemo(() => {
+    if (typeof window === "undefined") return { sourceId: null, destinationId: null };
+    const params = new URLSearchParams(window.location.search);
+    return {
+      sourceId: params.get("source"),
+      destinationId: params.get("destination"),
+    };
+  }, []);
+
   const [destination, setDestination] = useState<MapNode | null>(null);
   const [phase, setPhase] = useState<Phase>("pick");
   const [travelled, setTravelled] = useState(0);
@@ -219,8 +230,25 @@ export function NavigateView({ plan }: { plan: FloorPlan }) {
     vertexCount: number;
   } | null>(null);
 
-  const originNode = plan.nodes.find((n) => n.kind === "origin");
+  const originNode =
+    plan.nodes.find((n) => n.id === qrParams.sourceId) ??
+    plan.nodes.find((n) => n.kind === "origin");
+
   const destinationNodes = plan.nodes.filter((n) => n.kind === "destination");
+
+  const qrDestination = qrParams.destinationId
+    ? plan.nodes.find(
+        (n) => n.id === qrParams.destinationId && n.kind === "destination",
+      ) ?? null
+    : null;
+  useEffect(() => {
+    if (!qrDestination) return;
+    setDestination(qrDestination);
+    setTravelled(0);
+    setWalking(false);
+    setPhase("preview");
+  }, [qrDestination]);
+
   const pathNodes = useMemo(
     () =>
       originNode && destination
@@ -629,7 +657,7 @@ export function NavigateView({ plan }: { plan: FloorPlan }) {
                   <span className="min-w-0 flex-1">
                     <span className="block truncate font-medium">{d.name || d.id}</span>
                     <span className="block text-xs text-muted tabular-nums">
-                      {reachable ? `${meters.toFixed(0)} متر از ورودی` : "مسیر وصل نیست"}
+                      {reachable ? `${meters.toFixed(0)} متر از مبدأ` : "مسیر وصل نیست"}
                     </span>
                   </span>
                   <ArrowRight className="size-4 rotate-180 text-subtle" />
@@ -655,9 +683,11 @@ export function NavigateView({ plan }: { plan: FloorPlan }) {
                 : "مسیری پیدا نشد — اتصال‌ها را در ویرایشگر چک کنید"}
             </p>
           </div>
-          <Button variant="ghost" size="sm" onClick={() => setPhase("pick")}>
-            عوض کردن
-          </Button>
+          {!qrDestination && (
+            <Button variant="ghost" size="sm" onClick={() => setPhase("pick")}>
+              عوض کردن
+            </Button>
+          )}
         </div>
         <div className="overflow-hidden rounded-2xl bg-surface-2 p-2 shadow-[var(--shadow-border)]">
           <div className="overflow-hidden rounded-xl outline outline-1 -outline-offset-1 outline-fg/10">
@@ -669,7 +699,7 @@ export function NavigateView({ plan }: { plan: FloorPlan }) {
           شروع ناوبری
         </Button>
         <p className="text-center text-xs text-subtle">
-          روی گوشی، دوربین و قطب‌نما فعال می‌شوند. در پیش‌نمایش می‌توانید مسیر را شبیه‌سازی کنید.
+          با QR می‌توانید مبدأ و مقصد را مستقیم باز کنید؛ در غیر این صورت مقصد را دستی انتخاب کنید.
         </p>
       </div>
     );
