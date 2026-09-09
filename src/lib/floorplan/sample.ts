@@ -3,7 +3,22 @@ import type { Edge, FloorPlan, MapNode } from "./types";
 /** Sample clinic raster is 1792×1008. Coordinates are pixel positions on that sheet. */
 export const SAMPLE_MAP_SRC = "/maps/noor-clinic.jpg";
 export const SAMPLE_DIMS = { w: 1792, h: 1008 } as const;
-export const SAMPLE_METERS_PER_PX = 0.024;
+// Sample-map scale is derived from a demo calibration pair, not a magic scale constant.
+// In the real admin panel these two points and their real-world distance are entered by the admin.
+const SAMPLE_CALIBRATION = {
+  x1: 500,
+  y1: 870,
+  x2: 1288,
+  y2: 870,
+  realDistanceM: 10,
+} as const;
+
+export const SAMPLE_METERS_PER_PX =
+  SAMPLE_CALIBRATION.realDistanceM /
+  Math.hypot(
+    SAMPLE_CALIBRATION.x2 - SAMPLE_CALIBRATION.x1,
+    SAMPLE_CALIBRATION.y2 - SAMPLE_CALIBRATION.y1,
+  );
 
 function n(
   id: string,
