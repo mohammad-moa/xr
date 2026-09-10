@@ -332,6 +332,7 @@ function SchematicMap({ progress, arrowAngle }: { progress: number; arrowAngle: 
 }
 
 function ArWalkScreen({ destination, onExit }: { destination: QrDestination; onExit: () => void }) {
+  const [viewMode, setViewMode] = useState<"map" | "camera">("map");
   const [heading, setHeading] = useState<number | null>(null);
   const [motionActive, setMotionActive] = useState(false);
   const [sensorError, setSensorError] = useState<string | null>(null);
@@ -339,7 +340,11 @@ function ArWalkScreen({ destination, onExit }: { destination: QrDestination; onE
   const [remainingM, setRemainingM] = useState(destination.distanceMeters);
   const [targetBearing, setTargetBearing] = useState<number | null>(destination.bearingDeg ?? null);
   const [calibrated, setCalibrated] = useState(destination.bearingDeg !== undefined);
+  const [camReady, setCamReady] = useState(false);
+  const [camError, setCamError] = useState(false);
 
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const streamRef = useRef<MediaStream | null>(null);
   const filteredAccRef = useRef(9.8);
   const lastStepRef = useRef(0);
   const motionAttachedRef = useRef(false);
@@ -351,6 +356,38 @@ function ArWalkScreen({ destination, onExit }: { destination: QrDestination; onE
   const totalM = destination.distanceMeters;
   const progress = totalM > 0 ? Math.min(1, Math.max(0, (totalM - remainingM) / totalM)) : 0;
   const etaMin = Math.max(1, Math.round(((remainingM / 1.2) / 60) * 10) / 10);
+
+  // Camera only turns on in "camera" mode, and turns fully off (stops the
+  // stream) the moment you switch back to "map" — so the stable mode never
+  // carries any camera cost, and switching is always safe to try live.
+  useEffect(() => {
+    if (viewMode !== "camera") {
+      streamRef.current?.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
+      setCamReady(false);
+      return;
+    }
+    let stopped = false;
+    (async () => {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: "environment" } },
+          audio: false,
+        });
+        if (stopped) { stream.getTracks().forEach((t) => t.stop()); return; }
+        streamRef.current = stream;
+        if (videoRef.current) { videoRef.current.srcObject = stream; await videoRef.current.play(); }
+        setCamReady(true);
+      } catch {
+        setCamError(true);
+      }
+    })();
+    return () => {
+      stopped = true;
+      streamRef.current?.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
+    };
+  }, [viewMode]);
 
   useEffect(() => { headingRef.current = heading ?? 0; }, [heading]);
   useEffect(() => { if (targetBearing !== null) targetBearingRef.current = targetBearing; }, [targetBearing]);
@@ -469,19 +506,59 @@ function ArWalkScreen({ destination, onExit }: { destination: QrDestination; onE
             {arrived ? "رسیدید به مقصد" : `به سمت ${compassLabel(targetBearingRef.current)} بروید`}
           </p>
         </div>
+
+        {/* سوییچِ حالت — هر دو نسخه با هم، کاربر انتخاب می‌کنه */}
+        <div className="mt-3 flex gap-1 rounded-full bg-white/15 p-1">
+          <button
+            onClick={() => setViewMode("map")}
+            className={`flex-1 rounded-full py-1.5 text-xs font-medium transition-colors ${viewMode === "map" ? "bg-white text-primary" : "text-white/80"}`}
+          >
+            🗺 نقشه (پایدار)
+          </button>
+          <button
+            onClick={() => setViewMode("camera")}
+            className={`flex-1 rounded-full py-1.5 text-xs font-medium transition-colors ${viewMode === "camera" ? "bg-white text-primary" : "text-white/80"}`}
+          >
+            📷 دوربین (AR)
+          </button>
+        </div>
       </div>
 
-      {/* نقشه‌ی شماتیک — جای اورلیِ دوربین */}
-      <div className="flex flex-1 flex-col items-center justify-center px-4">
-        <SchematicMap progress={progress} arrowAngle={arrowAngle} />
-        {sensorError && <p className="mt-2 rounded-xl bg-white px-3 py-2 text-center text-xs text-muted shadow">{sensorError}</p>}
-        {!motionActive && (
-          <Button variant="secondary" className="mt-2" onClick={requestSensors}>
-            <Compass />
-            فعال‌سازی قطب‌نما و قدم‌شمار (iOS)
-          </Button>
-        )}
-      </div>
+      {/* بدنه: یا نقشه‌ی شماتیک، یا اورلیِ دوربین — بسته به سوییچِ بالا */}
+      {viewMode === "map" ? (
+        <div className="flex flex-1 flex-col items-center justify-center px-4">
+          <SchematicMap progress={progress} arrowAngle={arrowAngle} />
+          {sensorError && <p className="mt-2 rounded-xl bg-white px-3 py-2 text-center text-xs text-muted shadow">{sensorError}</p>}
+          {!motionActive && (
+            <Button variant="secondary" className="mt-2" onClick={requestSensors}>
+              <Compass />
+              فعال‌سازی قطب‌نما و قدم‌شمار (iOS)
+            </Button>
+          )}
+        </div>
+      ) : (
+        <div className="relative flex-1 overflow-hidden bg-black">
+          <video ref={videoRef} muted playsInline className="absolute inset-0 size-full object-cover" />
+          <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-black/20" />
+          <div className="relative z-10 flex h-full flex-col items-center justify-center gap-3 px-4">
+            {!arrived && (
+              <div className="text-7xl text-white drop-shadow-lg transition-transform duration-200 ease-out" style={{ transform: `rotate(${arrowAngle}deg)` }}>
+                ↑
+              </div>
+            )}
+            <p className="rounded-full bg-black/50 px-3 py-1 text-xs text-white">
+              {camError ? "دوربین در دسترس نیست" : camReady ? "دوربین فعال" : "در حال باز کردنِ دوربین..."}
+            </p>
+            {sensorError && <p className="rounded-xl bg-white/10 px-3 py-2 text-center text-xs text-white">{sensorError}</p>}
+            {!motionActive && (
+              <Button variant="secondary" onClick={requestSensors}>
+                <Compass />
+                فعال‌سازی قطب‌نما و قدم‌شمار (iOS)
+              </Button>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* نوارِ پایین، دقیقاً به سبکِ گوگل‌مپ: زمانِ تخمینی + فاصله */}
       <div
