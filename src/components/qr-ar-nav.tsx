@@ -296,15 +296,42 @@ function PickScreen({
 }
 
 // -------------------------------------------------------------- AR walk ----
-// دیگه هیچ WebXR/SLAM اینجا نیست — فقط دوربین (برای پس‌زمینه‌ی تزئینی)،
-// قطب‌نمای واقعیِ گوشی (برای جهت) و شتاب‌سنج (برای شمارش قدمِ واقعی).
+// نسخه‌ی «گوگلی»: بدون دوربین به‌عنوان صفحه‌ی اصلی — دقیقاً مثل ناوبریِ
+// پیاده‌ی خودِ گوگل‌مپ که هیچ AR/دوربینی نداره، فقط نقشه‌ی بالا-به-پایین +
+// پیکانِ جهت‌دار + کارتِ بالا/پایین. موقعیت هنوز از همون قطب‌نما + شتاب‌سنجِ
+// واقعیِ قبلی میاد (SLAM/دوربین هیچ‌وقت اینجا نبود)، فقط حالا به‌جای اورلی
+// روی تصویرِ دوربین، روی یه نقشه‌ی شماتیکِ ساده (خط از مبدأ تا مقصد) رسم
+// می‌شه — که هم پایدارتره، هم بصری‌ش به چیزی که کاربرا باهاش آشنان نزدیک‌تره.
+
+const COMPASS_LABELS = ["شمال", "شمال‌شرق", "شرق", "جنوب‌شرق", "جنوب", "جنوب‌غرب", "غرب", "شمال‌غرب"];
+function compassLabel(bearingDeg: number) {
+  const idx = Math.round(norm(bearingDeg) / 45) % 8;
+  return COMPASS_LABELS[idx];
+}
+
+function SchematicMap({ progress, arrowAngle }: { progress: number; arrowAngle: number }) {
+  // progress: 0 (مبدأ) تا 1 (مقصد). یه مسیرِ ساده‌ی عمودی رسم می‌کنیم چون از
+  // QR فقط فاصله (و شاید جهت) داریم، نه هندسه‌ی واقعیِ راهرو — دقیقاً مثل
+  // خیلی از اپ‌های "پیدا کردن ماشین" که مسیر رو خطی و ساده نشون می‌دن.
+  const y = 260 - progress * 200;
+  return (
+    <svg viewBox="0 0 200 280" className="mx-auto h-64 w-full max-w-[220px]">
+      <line x1="100" y1="260" x2="100" y2="60" stroke="currentColor" strokeWidth="10" strokeLinecap="round" className="text-border" />
+      <line x1="100" y1="260" x2="100" y2={y} stroke="currentColor" strokeWidth="10" strokeLinecap="round" className="text-primary" />
+      <circle cx="100" cy="260" r="7" fill="currentColor" className="text-muted" />
+      <g transform={`translate(100,60)`}>
+        <circle r="11" fill="currentColor" className="text-primary" />
+        <circle r="11" fill="none" stroke="white" strokeWidth="2.5" />
+      </g>
+      <g transform={`translate(100,${y}) rotate(${arrowAngle})`}>
+        <circle r="16" fill="currentColor" className="text-primary opacity-15" />
+        <path d="M0,-11 L7,7 L0,3 L-7,7 Z" fill="currentColor" className="text-primary" stroke="white" strokeWidth="2" />
+      </g>
+    </svg>
+  );
+}
 
 function ArWalkScreen({ destination, onExit }: { destination: QrDestination; onExit: () => void }) {
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const streamRef = useRef<MediaStream | null>(null);
-  const [camReady, setCamReady] = useState(false);
-  const [camError, setCamError] = useState(false);
-
   const [heading, setHeading] = useState<number | null>(null);
   const [motionActive, setMotionActive] = useState(false);
   const [sensorError, setSensorError] = useState<string | null>(null);
@@ -321,6 +348,9 @@ function ArWalkScreen({ destination, onExit }: { destination: QrDestination; onE
   const remainingRef = useRef(destination.distanceMeters);
 
   const arrived = remainingM < 0.4;
+  const totalM = destination.distanceMeters;
+  const progress = totalM > 0 ? Math.min(1, Math.max(0, (totalM - remainingM) / totalM)) : 0;
+  const etaMin = Math.max(1, Math.round(((remainingM / 1.2) / 60) * 10) / 10);
 
   useEffect(() => { headingRef.current = heading ?? 0; }, [heading]);
   useEffect(() => { if (targetBearing !== null) targetBearingRef.current = targetBearing; }, [targetBearing]);
@@ -341,7 +371,6 @@ function ArWalkScreen({ destination, onExit }: { destination: QrDestination; onE
     if (dynamic > STEP_THRESHOLD && now - lastStepRef.current > STEP_COOLDOWN_MS) {
       lastStepRef.current = now;
       setStepCount((c) => c + 1);
-      // اگه جهتِ واقعیِ قدم با جهتِ مقصد هم‌راستا بود، جلو؛ وگرنه (برگشتی) عقب
       const diff = Math.abs(signedDiff(targetBearingRef.current - headingRef.current));
       const forward = diff <= 90;
       remainingRef.current = Math.max(0, remainingRef.current + (forward ? -STEP_LENGTH_M : STEP_LENGTH_M));
@@ -382,34 +411,14 @@ function ArWalkScreen({ destination, onExit }: { destination: QrDestination; onE
       motionAttachedRef.current = true;
       setMotionActive(true);
     }
-
-    (async () => {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: { ideal: "environment" } },
-          audio: false,
-        });
-        streamRef.current = stream;
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          await videoRef.current.play();
-        }
-        setCamReady(true);
-      } catch {
-        setCamError(true);
-      }
-    })();
-
     return () => {
       window.removeEventListener("deviceorientation", onOrient, true);
       window.removeEventListener("devicemotion", onMotion, true);
-      streamRef.current?.getTracks().forEach((t) => t.stop());
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   function calibrateNow() {
-    // کاربر همین الان رو به سمتِ مقصد ایستاده — همین جهت رو به‌عنوانِ هدف ثبت می‌کنیم
     const b = heading ?? 0;
     setTargetBearing(b);
     targetBearingRef.current = b;
@@ -418,58 +427,74 @@ function ArWalkScreen({ destination, onExit }: { destination: QrDestination; onE
 
   const arrowAngle = heading === null || targetBearing === null ? 0 : signedDiff(targetBearingRef.current - heading);
 
-  return (
-    <div className="relative min-h-dvh overflow-hidden bg-black text-white">
-      <video ref={videoRef} muted playsInline className="absolute inset-0 size-full object-cover" />
-      <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/70 via-black/10 to-black/40" />
+  if (!calibrated) {
+    return (
+      <div className="flex min-h-dvh flex-col justify-between bg-bg p-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-[max(0.75rem,env(safe-area-inset-top))] text-fg">
+        <Button variant="secondary" size="sm" onClick={onExit} className="w-fit">
+          <ArrowRight className="rotate-180" />
+          خروج
+        </Button>
+        <div className="mx-auto max-w-xs space-y-3 text-center">
+          <p className="rounded-2xl border border-border bg-surface px-4 py-4 text-sm">
+            رو به همون سمتی وایسا که <b>{destination.name}</b> اونجاست، بعد بزن «همینجا، همین جهت»
+          </p>
+          <Button className="w-full" onClick={calibrateNow}>
+            <Compass />
+            همینجا، همین جهت
+          </Button>
+        </div>
+        <div />
+      </div>
+    );
+  }
 
-      <div className="relative z-10 mx-auto flex min-h-dvh w-full max-w-md flex-col justify-between p-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-[max(0.75rem,env(safe-area-inset-top))]">
-        <div className="flex items-center justify-between">
+  return (
+    <div className="flex min-h-dvh flex-col bg-neutral-100 text-fg">
+      {/* کارتِ بالا، دقیقاً به سبکِ گوگل‌مپ: جهتِ قطب‌نمایی + پیکان */}
+      <div
+        className="rounded-b-2xl bg-primary px-4 pb-4 shadow-lg"
+        style={{ paddingTop: "max(0.9rem, env(safe-area-inset-top))" }}
+      >
+        <div className="mb-2 flex items-center justify-between">
           <Button variant="secondary" size="sm" onClick={onExit}>
             <ArrowRight className="rotate-180" />
-            خروج
           </Button>
-          <Badge variant="muted">
-            {camError ? "دوربین در دسترس نیست" : camReady ? "دوربین فعال" : "..."} · {destination.name}
-          </Badge>
+          <span className="text-xs text-white/85">{destination.name}</span>
         </div>
+        <div className="flex items-center gap-3 text-white">
+          <div className="text-3xl transition-transform duration-200 ease-out" style={{ transform: `rotate(${arrowAngle}deg)` }}>
+            ↑
+          </div>
+          <p className="text-xl font-bold">
+            {arrived ? "رسیدید به مقصد" : `به سمت ${compassLabel(targetBearingRef.current)} بروید`}
+          </p>
+        </div>
+      </div>
 
-        {!calibrated ? (
-          <div className="mx-auto max-w-xs space-y-3 text-center">
-            <p className="rounded-xl bg-white/10 px-3 py-3 text-sm">
-              رو به همون سمتی وایسا که <b>{destination.name}</b> اونجاست، بعد بزن «همینجا، همین جهت»
-            </p>
-            <Button className="w-full" onClick={calibrateNow}>
-              <Compass />
-              همینجا، همین جهت
-            </Button>
-          </div>
-        ) : (
-          <div className="text-center">
-            <p className="text-5xl font-bold tabular-nums">{arrived ? "رسیدید" : `${remainingM.toFixed(1)} m`}</p>
-            {!arrived && (
-              <div
-                className="mx-auto mt-4 text-6xl transition-transform duration-200 ease-out"
-                style={{ transform: `rotate(${arrowAngle}deg)` }}
-              >
-                ↑
-              </div>
-            )}
-            {arrived && <p className="mt-2 text-sm text-white/80">به {destination.name} رسیدید</p>}
-          </div>
+      {/* نقشه‌ی شماتیک — جای اورلیِ دوربین */}
+      <div className="flex flex-1 flex-col items-center justify-center px-4">
+        <SchematicMap progress={progress} arrowAngle={arrowAngle} />
+        {sensorError && <p className="mt-2 rounded-xl bg-white px-3 py-2 text-center text-xs text-muted shadow">{sensorError}</p>}
+        {!motionActive && (
+          <Button variant="secondary" className="mt-2" onClick={requestSensors}>
+            <Compass />
+            فعال‌سازی قطب‌نما و قدم‌شمار (iOS)
+          </Button>
         )}
+      </div>
 
-        <div className="space-y-2">
-          {sensorError && <p className="rounded-xl bg-white/10 px-3 py-2 text-center text-xs">{sensorError}</p>}
-          {!motionActive && (
-            <Button variant="secondary" className="w-full" onClick={requestSensors}>
-              <Compass />
-              فعال‌سازی قطب‌نما و قدم‌شمار (iOS)
-            </Button>
-          )}
-          <div className="rounded-xl bg-white/10 px-3 py-2 text-center text-xs">
-            {motionActive ? `🚶 ${stepCount} قدم واقعی ثبت شد` : "قدم‌شمار هنوز فعال نشده"}
+      {/* نوارِ پایین، دقیقاً به سبکِ گوگل‌مپ: زمانِ تخمینی + فاصله */}
+      <div
+        className="rounded-t-2xl bg-white px-4 pt-3 shadow-[0_-4px_14px_rgba(0,0,0,0.08)]"
+        style={{ paddingBottom: "max(0.9rem, env(safe-area-inset-bottom))" }}
+      >
+        <div className="flex items-center justify-between">
+          <div className="text-xs text-muted">🚶 {motionActive ? `${stepCount} قدم` : "قدم‌شمار خاموش"}</div>
+          <div className="text-center">
+            <p className="text-2xl font-bold tabular-nums">{arrived ? "رسیدید" : `${etaMin} دقیقه`}</p>
+            <p className="text-xs text-muted">{arrived ? destination.name : `${remainingM.toFixed(0)} m`}</p>
           </div>
+          <div className="w-16" />
         </div>
       </div>
     </div>
