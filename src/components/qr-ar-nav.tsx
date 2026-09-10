@@ -1,22 +1,35 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { ArrowRight, MapPinned, QrCode, ScanLine } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { ArrowRight, Compass, MapPinned, QrCode, ScanLine } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 
 /**
- * یه فلوی کاملاً ساده و مستقل، جدا از سیستم نقشه‌ی پیکسلی:
+ * یه فلوی کاملاً ساده و مستقل، جدا از سیستم نقشه‌ی پیکسلی و جدا از WebXR/SLAM:
  *   ۱) کاربر یه QR اسکن می‌کنه (یا برای تست، داده‌ی نمونه رو بارگذاری می‌کنه)
  *   ۲) از توی QR، لیست مقصدها (هرکدوم با فاصله‌ی واقعیِ متری) درمیاد
  *   ۳) کاربر یکی رو انتخاب می‌کنه
- *   ۴) دوربین باز می‌شه و یه خط سبزِ راست، دقیقاً به‌اندازه‌ی همون فاصله‌ی
- *      واقعی، روی زمین رسم می‌شه — بدون هیچ نقشه‌ی پیکسلی، بدون قطب‌نما،
- *      بدون metersPerPixel. فقط متر واقعیِ خودِ WebXR.
+ *   ۴) دوربین باز می‌شه؛ یه پیکانِ AR روی تصویر، بر اساسِ قطب‌نمای واقعیِ گوشی
+ *      می‌چرخه و مسیر رو نشون می‌ده؛ فاصله هم از روی قدمِ واقعی (شتاب‌سنج)
+ *      کم می‌شه.
+ *
+ * چرا این‌جوری، نه WebXR/SLAM؟
+ *   SLAM (ردیابیِ کاملِ سه‌بعدی) ذاتاً شکننده‌ست — نیاز به نورِ خوب، تکون
+ *   دقیق، و چند ثانیه initialize داره، حتی توی اپ‌های نیتیو. قطب‌نما+قدم‌شمار
+ *   هیچ‌کدومِ این مشکلات رو نداره، روی iOS هم کار می‌کنه (WebXR فقط اندروید
+ *   بود)، و صد‌درصد با APIهای استانداردِ خودِ مرورگره — بدون هیچ سرویسِ بیرونی.
  *
  * فرمتِ داده‌ی داخلِ QR (یه رشته‌ی JSON):
- *   { "origin": "ورودی", "destinations": [{ "name": "اتاق ۱۰۲", "distanceMeters": 4 }] }
+ *   {
+ *     "origin": "ورودی",
+ *     "destinations": [
+ *       { "name": "اتاق ۱۰۲", "distanceMeters": 4, "bearingDeg": 90 }
+ *     ]
+ *   }
+ * bearingDeg اختیاریه (جهتِ قطب‌نماییِ مقصد نسبت به شمال، ۰-۳۵۹). اگه ندی،
+ * فرض می‌کنیم کاربر همون لحظه‌ی شروع، رو به مقصده (کالیبراسیونِ دستی).
  */
 
-type QrDestination = { name: string; distanceMeters: number };
+type QrDestination = { name: string; distanceMeters: number; bearingDeg?: number };
 type QrPayload = { origin?: string; destinations: QrDestination[] };
 
 const SAMPLE_PAYLOAD: QrPayload = {
@@ -27,79 +40,15 @@ const SAMPLE_PAYLOAD: QrPayload = {
   ],
 };
 
-type XRSessionLike = {
-  end: () => Promise<void>;
-  requestAnimationFrame: (cb: (t: number, frame: unknown) => number | void) => number;
-  updateRenderState: (state: Record<string, unknown>) => void;
-  requestReferenceSpace: (type: string) => Promise<unknown>;
-  addEventListener: (type: string, cb: () => void) => void;
+const STEP_LENGTH_M = 0.75;
+const STEP_THRESHOLD = 1.6;
+const STEP_COOLDOWN_MS = 300;
+
+const norm = (n: number) => ((n % 360) + 360) % 360;
+const signedDiff = (n: number) => {
+  const x = norm(n);
+  return x > 180 ? x - 360 : x;
 };
-
-type XRFrameLike = {
-  session: {
-    renderState: {
-      baseLayer: {
-        framebuffer: WebGLFramebuffer;
-        getViewport: (v: unknown) => { x: number; y: number; width: number; height: number };
-      };
-    };
-  };
-  getViewerPose: (rs: unknown) => {
-    transform: { position: { x: number; y: number; z: number }; matrix: Float32Array };
-    views: Array<{ projectionMatrix: Float32Array; transform: { inverse: { matrix: Float32Array } } }>;
-  } | null;
-};
-
-function mat4Multiply(a: Float32Array, b: Float32Array): Float32Array {
-  const out = new Float32Array(16);
-  for (let col = 0; col < 4; col++) {
-    for (let row = 0; row < 4; row++) {
-      let sum = 0;
-      for (let k = 0; k < 4; k++) sum += a[k * 4 + row] * b[col * 4 + k];
-      out[col * 4 + row] = sum;
-    }
-  }
-  return out;
-}
-
-function createLineProgram(gl: WebGLRenderingContext): WebGLProgram {
-  const vs = gl.createShader(gl.VERTEX_SHADER)!;
-  gl.shaderSource(vs, "attribute vec3 aPos; uniform mat4 uMVP; void main(){ gl_Position = uMVP * vec4(aPos, 1.0); }");
-  gl.compileShader(vs);
-  const fs = gl.createShader(gl.FRAGMENT_SHADER)!;
-  gl.shaderSource(fs, "precision mediump float; uniform vec4 uColor; void main(){ gl_FragColor = uColor; }");
-  gl.compileShader(fs);
-  const program = gl.createProgram()!;
-  gl.attachShader(program, vs);
-  gl.attachShader(program, fs);
-  gl.linkProgram(program);
-  return program;
-}
-
-/**
- * یه نوارِ راست، به‌اندازه‌ی distanceMeters، رو به جهتِ واقعیِ گوشی در لحظه‌ای
- * که ردیابی قفل شد (نه لحظه‌ی زدنِ دکمه — چون بینِ این دو، به‌خاطر تکون‌دادنِ
- * گوشی برای فعال‌سازیِ ردیابی، جهتش عوض شده). forward باید یه بردارِ افقیِ
- * یکه (طول ۱، فقط x/z) باشه.
- */
-function buildStraightLineVertices(
-  start: { x: number; y: number; z: number },
-  forward: { x: number; z: number },
-  distanceMeters: number,
-  halfWidthM = 0.09,
-): Float32Array {
-  const floorY = start.y - 1.2;
-  const a = { x: start.x, y: floorY, z: start.z };
-  const b = { x: start.x + forward.x * distanceMeters, y: floorY, z: start.z + forward.z * distanceMeters };
-  // عمود بر جهتِ حرکت، توی صفحه‌ی افقی (چرخشِ ۹۰ درجه‌ی بردار جلو)
-  const perpX = -forward.z * halfWidthM;
-  const perpZ = forward.x * halfWidthM;
-  const a1 = [a.x - perpX, a.y, a.z - perpZ];
-  const a2 = [a.x + perpX, a.y, a.z + perpZ];
-  const b1 = [b.x - perpX, b.y, b.z - perpZ];
-  const b2 = [b.x + perpX, b.y, b.z + perpZ];
-  return new Float32Array([...a1, ...a2, ...b1, ...a2, ...b2, ...b1]);
-}
 
 function parseQrPayload(text: string): QrPayload | null {
   try {
@@ -110,7 +59,11 @@ function parseQrPayload(text: string): QrPayload | null {
         const dd = d as Partial<QrDestination>;
         return typeof dd?.name === "string" && typeof dd?.distanceMeters === "number" && dd.distanceMeters > 0;
       })
-      .map((d: QrDestination) => ({ name: d.name, distanceMeters: d.distanceMeters }));
+      .map((d: QrDestination) => ({
+        name: d.name,
+        distanceMeters: d.distanceMeters,
+        bearingDeg: typeof d.bearingDeg === "number" ? norm(d.bearingDeg) : undefined,
+      }));
     if (destinations.length === 0) return null;
     return { origin: typeof data.origin === "string" ? data.origin : undefined, destinations };
   } catch {
@@ -343,209 +296,180 @@ function PickScreen({
 }
 
 // -------------------------------------------------------------- AR walk ----
+// دیگه هیچ WebXR/SLAM اینجا نیست — فقط دوربین (برای پس‌زمینه‌ی تزئینی)،
+// قطب‌نمای واقعیِ گوشی (برای جهت) و شتاب‌سنج (برای شمارش قدمِ واقعی).
 
 function ArWalkScreen({ destination, onExit }: { destination: QrDestination; onExit: () => void }) {
-  const [arSupported, setArSupported] = useState<boolean | null>(null);
-  const [remainingM, setRemainingM] = useState<number | null>(null);
-  const [arError, setArError] = useState<string | null>(null);
-  const [arHint, setArHint] = useState<string | null>(null);
-  const [started, setStarted] = useState(false);
-  const sessionRef = useRef<XRSessionLike | null>(null);
-  const startPosRef = useRef<{ x: number; y: number; z: number } | null>(null);
-  const startForwardRef = useRef<{ x: number; z: number } | null>(null);
-  const noPoseSinceRef = useRef<number | null>(null);
-  const lastUpdateRef = useRef(0);
-  const lineRef = useRef<{
-    gl: WebGLRenderingContext;
-    program: WebGLProgram;
-    posLoc: number;
-    mvpLoc: WebGLUniformLocation | null;
-    colorLoc: WebGLUniformLocation | null;
-    vbo: WebGLBuffer | null;
-    vertexCount: number;
-  } | null>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const [camReady, setCamReady] = useState(false);
+  const [camError, setCamError] = useState(false);
 
-  const arrived = remainingM !== null && remainingM < 0.4;
+  const [heading, setHeading] = useState<number | null>(null);
+  const [motionActive, setMotionActive] = useState(false);
+  const [sensorError, setSensorError] = useState<string | null>(null);
+  const [stepCount, setStepCount] = useState(0);
+  const [remainingM, setRemainingM] = useState(destination.distanceMeters);
+  const [targetBearing, setTargetBearing] = useState<number | null>(destination.bearingDeg ?? null);
+  const [calibrated, setCalibrated] = useState(destination.bearingDeg !== undefined);
 
-  useEffect(() => {
-    const xr = (navigator as unknown as { xr?: { isSessionSupported: (m: string) => Promise<boolean> } }).xr;
-    if (xr?.isSessionSupported) {
-      xr.isSessionSupported("immersive-ar").then(setArSupported).catch(() => setArSupported(false));
-    } else {
-      setArSupported(false);
-    }
-    return () => {
-      sessionRef.current?.end().catch(() => {});
-    };
-  }, []);
+  const filteredAccRef = useRef(9.8);
+  const lastStepRef = useRef(0);
+  const motionAttachedRef = useRef(false);
+  const headingRef = useRef(0);
+  const targetBearingRef = useRef(destination.bearingDeg ?? 0);
+  const remainingRef = useRef(destination.distanceMeters);
 
-  async function start() {
-    setArError(null);
-    const xr = (navigator as unknown as {
-      xr?: { requestSession: (mode: string, opts: Record<string, unknown>) => Promise<XRSessionLike> };
-    }).xr;
-    if (!xr) {
-      setArError("این مرورگر از AR واقعی پشتیبانی نمی‌کند.");
-      return;
-    }
-    try {
-      const canvas = document.createElement("canvas");
-      const gl = canvas.getContext("webgl", { xrCompatible: true }) as (WebGLRenderingContext & {
-        makeXRCompatible?: () => Promise<void>;
-      }) | null;
-      if (!gl) throw new Error("no-webgl");
-      if (gl.makeXRCompatible) await gl.makeXRCompatible();
+  const arrived = remainingM < 0.4;
 
-      const program = createLineProgram(gl);
-      lineRef.current = {
-        gl,
-        program,
-        posLoc: gl.getAttribLocation(program, "aPos"),
-        mvpLoc: gl.getUniformLocation(program, "uMVP"),
-        colorLoc: gl.getUniformLocation(program, "uColor"),
-        vbo: gl.createBuffer(),
-        vertexCount: 0,
-      };
+  useEffect(() => { headingRef.current = heading ?? 0; }, [heading]);
+  useEffect(() => { if (targetBearing !== null) targetBearingRef.current = targetBearing; }, [targetBearing]);
 
-      const session = await xr.requestSession("immersive-ar", { requiredFeatures: ["local"] });
-      sessionRef.current = session;
-      setStarted(true);
-      const XRWebGLLayerCtor = (window as unknown as { XRWebGLLayer: new (s: unknown, g: unknown) => unknown })
-        .XRWebGLLayer;
-      session.updateRenderState({ baseLayer: new XRWebGLLayerCtor(session, gl) });
-      const refSpace = await session.requestReferenceSpace("local");
+  function onOrient(e: DeviceOrientationEvent) {
+    const x = e as DeviceOrientationEvent & { webkitCompassHeading?: number };
+    if (typeof x.webkitCompassHeading === "number") setHeading(norm(x.webkitCompassHeading));
+    else if (typeof e.alpha === "number") setHeading(norm(360 - e.alpha));
+  }
 
-      startPosRef.current = null;
-      startForwardRef.current = null;
-      noPoseSinceRef.current = null;
-      setArHint(null);
-      setRemainingM(null);
-
-      const onFrame = (_t: number, frame: unknown) => {
-        session.requestAnimationFrame(onFrame);
-        try {
-          const f = frame as XRFrameLike;
-          const pose = f.getViewerPose(refSpace);
-          if (!pose) {
-            if (noPoseSinceRef.current === null) {
-              noPoseSinceRef.current = performance.now();
-              // از همون لحظه‌ی اول راهنما رو نشون بده، منتظر گیرکردن نمون
-              setArHint("گوشی رو آروم و پیوسته تکون بده (نه بچرخون)، رو به یه‌جای روشن و پرجزئیات — چند ثانیه طول می‌کشه");
-            } else if (performance.now() - noPoseSinceRef.current > 8000) {
-              setArHint("هنوز ردیابی پیدا نشد — نور محیط رو بیشتر کن یا رو به یه سطحِ دیگه (نه دیوارِ خالی/براق) بگیر");
-            }
-            return;
-          }
-          noPoseSinceRef.current = null;
-          setArHint(null);
-          const p = pose.transform.position;
-
-          if (!startPosRef.current) {
-            startPosRef.current = { x: p.x, y: p.y, z: p.z };
-            // جهتِ واقعیِ «جلو»ی گوشی رو همین الان (نه لحظه‌ی زدنِ دکمه) از
-            // ماتریسِ pose می‌گیریم — چون تا همین‌جا، برای فعال‌سازیِ ردیابی
-            // گوشی رو تکون دادی و جهتش عوض شده. ستونِ سومِ ماتریس (اندیس‌های
-            // ۸،۹،۱۰) محورِ Z محلیِ گوشیه؛ جلو = منفیِ همون، روی صفحه‌ی افقی.
-            const m = pose.transform.matrix;
-            const fx = -m[8];
-            const fz = -m[10];
-            const len = Math.hypot(fx, fz) || 1;
-            startForwardRef.current = { x: fx / len, z: fz / len };
-
-            const line = lineRef.current;
-            if (line) {
-              const verts = buildStraightLineVertices(startPosRef.current, startForwardRef.current, destination.distanceMeters);
-              line.gl.bindBuffer(line.gl.ARRAY_BUFFER, line.vbo);
-              line.gl.bufferData(line.gl.ARRAY_BUFFER, verts, line.gl.STATIC_DRAW);
-              line.vertexCount = verts.length / 3;
-            }
-            return;
-          }
-
-          const line = lineRef.current;
-          const baseLayer = f.session.renderState.baseLayer;
-          if (line && baseLayer && line.vertexCount > 0) {
-            const { gl: lgl, program: lprog, posLoc, mvpLoc, colorLoc, vbo } = line;
-            lgl.bindFramebuffer(lgl.FRAMEBUFFER, baseLayer.framebuffer);
-            lgl.clearColor(0, 0, 0, 0);
-            lgl.clear(lgl.COLOR_BUFFER_BIT | lgl.DEPTH_BUFFER_BIT);
-            lgl.enable(lgl.BLEND);
-            lgl.blendFunc(lgl.SRC_ALPHA, lgl.ONE_MINUS_SRC_ALPHA);
-            lgl.useProgram(lprog);
-            lgl.bindBuffer(lgl.ARRAY_BUFFER, vbo);
-            lgl.enableVertexAttribArray(posLoc);
-            lgl.vertexAttribPointer(posLoc, 3, lgl.FLOAT, false, 0, 0);
-            lgl.uniform4f(colorLoc, 0.16, 0.9, 0.45, 0.9);
-            for (const view of pose.views) {
-              const vp = baseLayer.getViewport(view);
-              lgl.viewport(vp.x, vp.y, vp.width, vp.height);
-              const mvp = mat4Multiply(view.projectionMatrix, view.transform.inverse.matrix);
-              lgl.uniformMatrix4fv(mvpLoc, false, mvp);
-              lgl.drawArrays(lgl.TRIANGLES, 0, line.vertexCount);
-            }
-          }
-
-          const now = performance.now();
-          if (now - lastUpdateRef.current < 100) return;
-          lastUpdateRef.current = now;
-
-          // جلو = محور -Z محلی؛ هرچی جلوتر بری، z کوچیک‌تر (منفی‌تر) می‌شه
-          // پیشرفت = فاصله‌ای که واقعاً توی همون جهتِ «جلو»ی کالیبره‌شده جلو رفتی
-          const fwd = startForwardRef.current ?? { x: 0, z: -1 };
-          const progress = (p.x - startPosRef.current.x) * fwd.x + (p.z - startPosRef.current.z) * fwd.z;
-          setRemainingM(Math.max(0, destination.distanceMeters - progress));
-        } catch (err) {
-          setArError((prev) => prev ?? (err instanceof Error ? `خطای رندر: ${err.message}` : "خطای نامشخص"));
-        }
-      };
-      session.requestAnimationFrame(onFrame);
-      session.addEventListener("end", () => {
-        sessionRef.current = null;
-        lineRef.current = null;
-        setStarted(false);
-      });
-    } catch (err) {
-      setArError(err instanceof Error ? err.message : "شروع AR ناموفق بود.");
+  function onMotion(e: DeviceMotionEvent) {
+    const acc = e.accelerationIncludingGravity || e.acceleration;
+    if (!acc || acc.x === null) return;
+    const mag = Math.sqrt((acc.x || 0) ** 2 + (acc.y || 0) ** 2 + (acc.z || 0) ** 2);
+    filteredAccRef.current = filteredAccRef.current * 0.9 + mag * 0.1;
+    const dynamic = mag - filteredAccRef.current;
+    const now = Date.now();
+    if (dynamic > STEP_THRESHOLD && now - lastStepRef.current > STEP_COOLDOWN_MS) {
+      lastStepRef.current = now;
+      setStepCount((c) => c + 1);
+      // اگه جهتِ واقعیِ قدم با جهتِ مقصد هم‌راستا بود، جلو؛ وگرنه (برگشتی) عقب
+      const diff = Math.abs(signedDiff(targetBearingRef.current - headingRef.current));
+      const forward = diff <= 90;
+      remainingRef.current = Math.max(0, remainingRef.current + (forward ? -STEP_LENGTH_M : STEP_LENGTH_M));
+      setRemainingM(remainingRef.current);
     }
   }
 
+  async function requestSensors() {
+    if (motionAttachedRef.current) return;
+    try {
+      const DOE = window.DeviceOrientationEvent as unknown as { requestPermission?: () => Promise<string> };
+      const DME = window.DeviceMotionEvent as unknown as { requestPermission?: () => Promise<string> };
+      if (typeof DOE?.requestPermission === "function") {
+        const res = await DOE.requestPermission();
+        if (res !== "granted") { setSensorError("اجازه‌ی دسترسی به قطب‌نما داده نشد."); return; }
+      }
+      if (typeof DME?.requestPermission === "function") {
+        const res = await DME.requestPermission();
+        if (res !== "granted") { setSensorError("اجازه‌ی دسترسی به شتاب‌سنج داده نشد."); return; }
+      }
+      window.addEventListener("deviceorientation", onOrient, true);
+      window.addEventListener("devicemotion", onMotion, true);
+      motionAttachedRef.current = true;
+      setMotionActive(true);
+      setSensorError(null);
+    } catch {
+      setSensorError("این مرورگر به حسگرهای حرکتی دسترسی نمی‌دهد.");
+    }
+  }
+
+  useEffect(() => {
+    const DOE = typeof window !== "undefined"
+      ? (window.DeviceOrientationEvent as unknown as { requestPermission?: unknown })
+      : undefined;
+    if (DOE && typeof DOE.requestPermission !== "function") {
+      window.addEventListener("deviceorientation", onOrient, true);
+      window.addEventListener("devicemotion", onMotion, true);
+      motionAttachedRef.current = true;
+      setMotionActive(true);
+    }
+
+    (async () => {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: "environment" } },
+          audio: false,
+        });
+        streamRef.current = stream;
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          await videoRef.current.play();
+        }
+        setCamReady(true);
+      } catch {
+        setCamError(true);
+      }
+    })();
+
+    return () => {
+      window.removeEventListener("deviceorientation", onOrient, true);
+      window.removeEventListener("devicemotion", onMotion, true);
+      streamRef.current?.getTracks().forEach((t) => t.stop());
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  function calibrateNow() {
+    // کاربر همین الان رو به سمتِ مقصد ایستاده — همین جهت رو به‌عنوانِ هدف ثبت می‌کنیم
+    const b = heading ?? 0;
+    setTargetBearing(b);
+    targetBearingRef.current = b;
+    setCalibrated(true);
+  }
+
+  const arrowAngle = heading === null || targetBearing === null ? 0 : signedDiff(targetBearingRef.current - heading);
+
   return (
-    <div className="relative min-h-dvh bg-black text-white">
+    <div className="relative min-h-dvh overflow-hidden bg-black text-white">
+      <video ref={videoRef} muted playsInline className="absolute inset-0 size-full object-cover" />
+      <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/70 via-black/10 to-black/40" />
+
       <div className="relative z-10 mx-auto flex min-h-dvh w-full max-w-md flex-col justify-between p-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-[max(0.75rem,env(safe-area-inset-top))]">
         <div className="flex items-center justify-between">
           <Button variant="secondary" size="sm" onClick={onExit}>
             <ArrowRight className="rotate-180" />
             خروج
           </Button>
-          <Badge variant="muted">{destination.name}</Badge>
+          <Badge variant="muted">
+            {camError ? "دوربین در دسترس نیست" : camReady ? "دوربین فعال" : "..."} · {destination.name}
+          </Badge>
         </div>
 
-        {arSupported === false && (
-          <p className="mx-auto max-w-xs rounded-xl bg-white/10 px-3 py-2 text-center text-xs">
-            این گوشی/مرورگر از AR واقعی پشتیبانی نمی‌کنه (فقط Chrome روی اندروید با ARCore).
-          </p>
+        {!calibrated ? (
+          <div className="mx-auto max-w-xs space-y-3 text-center">
+            <p className="rounded-xl bg-white/10 px-3 py-3 text-sm">
+              رو به همون سمتی وایسا که <b>{destination.name}</b> اونجاست، بعد بزن «همینجا، همین جهت»
+            </p>
+            <Button className="w-full" onClick={calibrateNow}>
+              <Compass />
+              همینجا، همین جهت
+            </Button>
+          </div>
+        ) : (
+          <div className="text-center">
+            <p className="text-5xl font-bold tabular-nums">{arrived ? "رسیدید" : `${remainingM.toFixed(1)} m`}</p>
+            {!arrived && (
+              <div
+                className="mx-auto mt-4 text-6xl transition-transform duration-200 ease-out"
+                style={{ transform: `rotate(${arrowAngle}deg)` }}
+              >
+                ↑
+              </div>
+            )}
+            {arrived && <p className="mt-2 text-sm text-white/80">به {destination.name} رسیدید</p>}
+          </div>
         )}
 
-        <div className="text-center">
-          <p className="text-5xl font-bold tabular-nums">
-            {arrived ? "رسیدید" : remainingM === null ? "—" : `${remainingM.toFixed(1)} m`}
-          </p>
-          {arrived && <p className="mt-2 text-sm text-white/80">به {destination.name} رسیدید</p>}
-        </div>
-
         <div className="space-y-2">
-          {arError && <p className="rounded-xl bg-white/10 px-3 py-2 text-center text-xs">{arError}</p>}
-          {arHint && <p className="rounded-xl bg-amber-500/25 px-3 py-2 text-center text-xs">{arHint}</p>}
-          {arSupported && !started && (
-            <>
-              <p className="rounded-xl bg-amber-500/15 px-3 py-2 text-center text-xs">
-                قبل از زدنِ دکمه، رو به همون طرفی وایسا که قراره راه بری.
-              </p>
-              <Button className="w-full" onClick={start}>
-                شروعِ AR واقعی
-              </Button>
-            </>
+          {sensorError && <p className="rounded-xl bg-white/10 px-3 py-2 text-center text-xs">{sensorError}</p>}
+          {!motionActive && (
+            <Button variant="secondary" className="w-full" onClick={requestSensors}>
+              <Compass />
+              فعال‌سازی قطب‌نما و قدم‌شمار (iOS)
+            </Button>
           )}
+          <div className="rounded-xl bg-white/10 px-3 py-2 text-center text-xs">
+            {motionActive ? `🚶 ${stepCount} قدم واقعی ثبت شد` : "قدم‌شمار هنوز فعال نشده"}
+          </div>
         </div>
       </div>
     </div>
