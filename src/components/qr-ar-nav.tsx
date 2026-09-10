@@ -332,7 +332,7 @@ function SchematicMap({ progress, arrowAngle }: { progress: number; arrowAngle: 
 }
 
 function ArWalkScreen({ destination, onExit }: { destination: QrDestination; onExit: () => void }) {
-  const [viewMode, setViewMode] = useState<"map" | "camera">("map");
+  const [viewMode, setViewMode] = useState<"map" | "camera" | "xr">("map");
   const [heading, setHeading] = useState<number | null>(null);
   const [motionActive, setMotionActive] = useState(false);
   const [sensorError, setSensorError] = useState<string | null>(null);
@@ -507,7 +507,7 @@ function ArWalkScreen({ destination, onExit }: { destination: QrDestination; onE
           </p>
         </div>
 
-        {/* سوییچِ حالت — هر دو نسخه با هم، کاربر انتخاب می‌کنه */}
+        {/* سوییچِ حالت — هر سه با هم، کاربر انتخاب می‌کنه */}
         <div className="mt-3 flex gap-1 rounded-full bg-white/15 p-1">
           <button
             onClick={() => setViewMode("map")}
@@ -519,13 +519,23 @@ function ArWalkScreen({ destination, onExit }: { destination: QrDestination; onE
             onClick={() => setViewMode("camera")}
             className={`flex-1 rounded-full py-1.5 text-xs font-medium transition-colors ${viewMode === "camera" ? "bg-white text-primary" : "text-white/80"}`}
           >
-            📷 دوربین (AR)
+            📷 دوربین
+          </button>
+          <button
+            onClick={() => setViewMode("xr")}
+            className={`flex-1 rounded-full py-1.5 text-xs font-medium transition-colors ${viewMode === "xr" ? "bg-white text-primary" : "text-white/80"}`}
+          >
+            🥽 AR واقعی
           </button>
         </div>
       </div>
 
-      {/* بدنه: یا نقشه‌ی شماتیک، یا اورلیِ دوربین — بسته به سوییچِ بالا */}
-      {viewMode === "map" ? (
+      {/* بدنه: نقشه‌ی شماتیک، اورلیِ دوربینِ ساده، یا WebXR واقعی — بسته به سوییچِ بالا */}
+      {viewMode === "xr" ? (
+        <div className="flex-1">
+          <XrArView distanceMeters={destination.distanceMeters} destinationName={destination.name} onExit={onExit} />
+        </div>
+      ) : viewMode === "map" ? (
         <div className="flex flex-1 flex-col items-center justify-center px-4">
           <SchematicMap progress={progress} arrowAngle={arrowAngle} />
           {sensorError && <p className="mt-2 rounded-xl bg-white px-3 py-2 text-center text-xs text-muted shadow">{sensorError}</p>}
@@ -560,19 +570,292 @@ function ArWalkScreen({ destination, onExit }: { destination: QrDestination; onE
         </div>
       )}
 
-      {/* نوارِ پایین، دقیقاً به سبکِ گوگل‌مپ: زمانِ تخمینی + فاصله */}
-      <div
-        className="rounded-t-2xl bg-white px-4 pt-3 shadow-[0_-4px_14px_rgba(0,0,0,0.08)]"
-        style={{ paddingBottom: "max(0.9rem, env(safe-area-inset-bottom))" }}
-      >
-        <div className="flex items-center justify-between">
-          <div className="text-xs text-muted">🚶 {motionActive ? `${stepCount} قدم` : "قدم‌شمار خاموش"}</div>
-          <div className="text-center">
-            <p className="text-2xl font-bold tabular-nums">{arrived ? "رسیدید" : `${etaMin} دقیقه`}</p>
-            <p className="text-xs text-muted">{arrived ? destination.name : `${remainingM.toFixed(0)} m`}</p>
+      {/* نوارِ پایین، دقیقاً به سبکِ گوگل‌مپ: زمانِ تخمینی + فاصله — توی حالتِ AR واقعی خودِ XrArView این رو داره */}
+      {viewMode !== "xr" && (
+        <div
+          className="rounded-t-2xl bg-white px-4 pt-3 shadow-[0_-4px_14px_rgba(0,0,0,0.08)]"
+          style={{ paddingBottom: "max(0.9rem, env(safe-area-inset-bottom))" }}
+        >
+          <div className="flex items-center justify-between">
+            <div className="text-xs text-muted">🚶 {motionActive ? `${stepCount} قدم` : "قدم‌شمار خاموش"}</div>
+            <div className="text-center">
+              <p className="text-2xl font-bold tabular-nums">{arrived ? "رسیدید" : `${etaMin} دقیقه`}</p>
+              <p className="text-xs text-muted">{arrived ? destination.name : `${remainingM.toFixed(0)} m`}</p>
+            </div>
+            <div className="w-16" />
           </div>
-          <div className="w-16" />
         </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------- Real AR ----
+// این تنها بخشیه که واقعاً از WebXR (ARCore روی Chrome/اندروید) استفاده
+// می‌کنه — همون خطِ سبزِ واقعی، چسبیده به زمین. برخلافِ بقیه‌ی این فایل
+// (که از قطب‌نما استفاده می‌کرد)، اینجا موقعیتِ مقصد مستقیم داخلِ فضای
+// سه‌بعدیِ خودِ AR ثبت می‌شه — یعنی هیچ وابستگی‌ای به سنسورِ مغناطیسیِ گوشی
+// نداره (که گفتیم داخلِ ساختمون غیرقابل‌اعتماده). به همین دلیل این
+// دقیق‌ترین حالتیه که می‌شه ساخت — ولی همچنان به کیفیتِ ردیابیِ بصریِ
+// خودِ ARCore (نور، بافت، انعکاس) وابسته‌ست؛ این محدودیت رو نمی‌شه با کد
+// دور زد، فقط با محیط/تجهیزاتِ بهتر.
+//
+// eslint-disable @typescript-eslint/no-explicit-any -- کتابخانه‌ی رسمیِ
+// تایپ برای WebXR نصب نیست؛ همه‌جا از any استفاده شده تا بدونِ افزودنِ
+// دیپندنسیِ جدید کامپایل بشه.
+
+function multiplyMat4(a: Float32Array, b: Float32Array): Float32Array {
+  const out = new Float32Array(16);
+  for (let i = 0; i < 4; i++) {
+    for (let j = 0; j < 4; j++) {
+      let sum = 0;
+      for (let k = 0; k < 4; k++) sum += a[k * 4 + j] * b[i * 4 + k];
+      out[i * 4 + j] = sum;
+    }
+  }
+  return out;
+}
+
+function XrArView({ distanceMeters, destinationName, onExit }: { distanceMeters: number; destinationName: string; onExit: () => void }) {
+  const [supported, setSupported] = useState<boolean | null>(null);
+  const [sessionActive, setSessionActive] = useState(false);
+  const [calibrated, setCalibrated] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const overlayRef = useRef<HTMLDivElement>(null);
+  const distanceElRef = useRef<HTMLParagraphElement>(null);
+  const instructionElRef = useRef<HTMLParagraphElement>(null);
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const sessionRef = useRef<any>(null);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const glRef = useRef<any>(null);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const refSpaceRef = useRef<any>(null);
+  const programRef = useRef<WebGLProgram | null>(null);
+  const bufferRef = useRef<WebGLBuffer | null>(null);
+  const mvpLocRef = useRef<WebGLUniformLocation | null>(null);
+  const colorLocRef = useRef<WebGLUniformLocation | null>(null);
+  const posLocRef = useRef<number>(0);
+
+  const lastPoseRef = useRef<{ x: number; z: number; yaw: number } | null>(null);
+  const destOffsetRef = useRef<{ x: number; z: number } | null>(null);
+  const calibratedRef = useRef(false);
+
+  useEffect(() => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const xr = (navigator as any).xr;
+    if (!xr) { setSupported(false); return; }
+    xr.isSessionSupported("immersive-ar").then((ok: boolean) => setSupported(ok)).catch(() => setSupported(false));
+  }, []);
+
+  function setupGL() {
+    const gl = glRef.current;
+    const vsSrc = "attribute vec3 aPos; uniform mat4 uMVP; void main(){ gl_Position = uMVP * vec4(aPos,1.0); }";
+    const fsSrc = "precision mediump float; uniform vec4 uColor; void main(){ gl_FragColor = uColor; }";
+    function compile(type: number, src: string) {
+      const sh = gl.createShader(type);
+      gl.shaderSource(sh, src);
+      gl.compileShader(sh);
+      return sh;
+    }
+    const vs = compile(gl.VERTEX_SHADER, vsSrc);
+    const fs = compile(gl.FRAGMENT_SHADER, fsSrc);
+    const program = gl.createProgram();
+    gl.attachShader(program, vs);
+    gl.attachShader(program, fs);
+    gl.linkProgram(program);
+    programRef.current = program;
+    posLocRef.current = gl.getAttribLocation(program, "aPos");
+    mvpLocRef.current = gl.getUniformLocation(program, "uMVP");
+    colorLocRef.current = gl.getUniformLocation(program, "uColor");
+    bufferRef.current = gl.createBuffer();
+  }
+
+  function computeYaw(orientation: { x: number; y: number; z: number; w: number }) {
+    const { x, y, z, w } = orientation;
+    return Math.atan2(2 * (w * y + x * z), 1 - 2 * (y * y + x * x));
+  }
+
+  function onXRFrame(_t: number, frame: any) {
+    const session = sessionRef.current;
+    if (!session) return;
+    session.requestAnimationFrame(onXRFrame);
+    const pose = frame.getViewerPose(refSpaceRef.current);
+    if (!pose) return;
+
+    const p = pose.transform.position;
+    const yaw = computeYaw(pose.transform.orientation);
+    lastPoseRef.current = { x: p.x, z: p.z, yaw };
+
+    const gl = glRef.current;
+    const glLayer = session.renderState.baseLayer;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, glLayer.framebuffer);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+
+    if (calibratedRef.current && destOffsetRef.current) {
+      const dest = destOffsetRef.current;
+      const dx = dest.x - p.x;
+      const dz = dest.z - p.z;
+      const dist = Math.hypot(dx, dz);
+      const arrived = dist < 0.4;
+      if (distanceElRef.current) distanceElRef.current.textContent = arrived ? "رسیدید" : `${dist.toFixed(1)} m`;
+      if (instructionElRef.current) instructionElRef.current.textContent = arrived ? `رسیدید به ${destinationName}` : "مسیرِ سبز را دنبال کنید";
+
+      if (!arrived) {
+        const len = Math.max(dist, 0.001);
+        const dirX = dx / len, dirZ = dz / len;
+        const perpX = -dirZ, perpZ = dirX;
+        const halfW = 0.22;
+        const y = 0.02;
+        // eslint-disable-next-line prettier/prettier
+        const verts = new Float32Array([
+          p.x + perpX * halfW, y, p.z + perpZ * halfW,
+          p.x - perpX * halfW, y, p.z - perpZ * halfW,
+          dest.x + perpX * halfW, y, dest.z + perpZ * halfW,
+          dest.x - perpX * halfW, y, dest.z - perpZ * halfW,
+        ]);
+
+        for (const view of pose.views) {
+          const viewport = glLayer.getViewport(view);
+          gl.viewport(viewport.x, viewport.y, viewport.width, viewport.height);
+          const mvp = multiplyMat4(view.projectionMatrix as Float32Array, (view.transform.inverse.matrix as Float32Array));
+          gl.useProgram(programRef.current);
+          gl.bindBuffer(gl.ARRAY_BUFFER, bufferRef.current);
+          gl.bufferData(gl.ARRAY_BUFFER, verts, gl.DYNAMIC_DRAW);
+          gl.enableVertexAttribArray(posLocRef.current);
+          gl.vertexAttribPointer(posLocRef.current, 3, gl.FLOAT, false, 0, 0);
+          gl.uniformMatrix4fv(mvpLocRef.current, false, mvp);
+          gl.uniform4f(colorLocRef.current, 0.16, 0.75, 0.62, 0.75);
+          gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+        }
+      }
+    } else if (instructionElRef.current) {
+      instructionElRef.current.textContent = `رو به سمت «${destinationName}» بایست و کالیبره کن`;
+    }
+  }
+
+  async function startSession() {
+    setError(null);
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const xr = (navigator as any).xr;
+      const canvas = canvasRef.current!;
+      const gl = canvas.getContext("webgl", { xrCompatible: true }) as any;
+      glRef.current = gl;
+      setupGL();
+
+      const session = await xr.requestSession("immersive-ar", {
+        requiredFeatures: ["local-floor"],
+        optionalFeatures: ["dom-overlay"],
+        domOverlay: { root: overlayRef.current },
+      });
+      sessionRef.current = session;
+      await gl.makeXRCompatible();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const XRWebGLLayer = (window as any).XRWebGLLayer;
+      session.updateRenderState({ baseLayer: new XRWebGLLayer(session, gl) });
+      refSpaceRef.current = await session.requestReferenceSpace("local-floor");
+
+      session.addEventListener("end", () => {
+        sessionRef.current = null;
+        setSessionActive(false);
+        setCalibrated(false);
+        calibratedRef.current = false;
+        destOffsetRef.current = null;
+      });
+
+      setSessionActive(true);
+      session.requestAnimationFrame(onXRFrame);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "راه‌اندازیِ AR ناموفق بود.");
+    }
+  }
+
+  function calibrateHere() {
+    const pose = lastPoseRef.current;
+    if (!pose) return;
+    destOffsetRef.current = {
+      x: pose.x + distanceMeters * Math.sin(pose.yaw),
+      z: pose.z - distanceMeters * Math.cos(pose.yaw),
+    };
+    calibratedRef.current = true;
+    setCalibrated(true);
+  }
+
+  function endSession() {
+    sessionRef.current?.end();
+    onExit();
+  }
+
+  if (supported === false) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-3 bg-neutral-900 px-6 text-center text-white">
+        <p className="text-sm">
+          این قابلیت فقط روی Chrome اندروید (نسخه‌های جدید) در دسترسه — دستگاه یا مرورگرِ فعلی WebXR نداره.
+        </p>
+        <Button variant="secondary" onClick={onExit}>
+          <ArrowRight className="rotate-180" />
+          برگرد به نقشه
+        </Button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="relative h-full bg-black">
+      <canvas ref={canvasRef} className="absolute inset-0 size-full" />
+      <div ref={overlayRef} className="absolute inset-0">
+        {!sessionActive && (
+          <div className="flex h-full flex-col items-center justify-center gap-3 bg-neutral-900/95 px-6 text-center text-white">
+            <p className="text-sm text-white/80">
+              دقیق‌ترین حالت — بدون وابستگی به قطب‌نما. دستگاه باید ARCore داشته باشه.
+            </p>
+            {error && <p className="rounded-xl bg-white/10 px-3 py-2 text-xs">{error}</p>}
+            <Button onClick={startSession}>
+              <Compass />
+              شروعِ AR واقعی
+            </Button>
+            <Button variant="secondary" onClick={onExit}>برگرد</Button>
+          </div>
+        )}
+
+        {sessionActive && (
+          <div className="pointer-events-none absolute inset-0 flex flex-col justify-between p-4">
+            <div className="pointer-events-auto flex items-center justify-between">
+              <Button variant="secondary" size="sm" onClick={endSession}>
+                <ArrowRight className="rotate-180" />
+                خروج
+              </Button>
+              <span className="rounded-full bg-black/50 px-3 py-1 text-xs text-white">{destinationName}</span>
+            </div>
+
+            {!calibrated ? (
+              <div className="pointer-events-auto mx-auto max-w-xs space-y-3 rounded-2xl bg-black/60 p-4 text-center text-white">
+                <p ref={instructionElRef} className="text-sm">
+                  رو به سمت «{destinationName}» بایست و کالیبره کن
+                </p>
+                <Button className="w-full" onClick={calibrateHere}>
+                  <Compass />
+                  همینجا، همین جهت
+                </Button>
+              </div>
+            ) : (
+              <div className="pointer-events-none mx-auto rounded-2xl bg-black/50 px-4 py-3 text-center text-white">
+                <p ref={distanceElRef} className="text-3xl font-bold tabular-nums">
+                  {distanceMeters.toFixed(1)} m
+                </p>
+                <p ref={instructionElRef} className="mt-1 text-xs text-white/80">
+                  مسیرِ سبز را دنبال کنید
+                </p>
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
