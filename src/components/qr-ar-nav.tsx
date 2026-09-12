@@ -749,7 +749,10 @@ function XrArView({ distanceMeters, destinationName, onExit }: { distanceMeters:
         const dirX = dx / len, dirZ = dz / len;
         const perpX = -dirZ, perpZ = dirX;
         const halfW = 0.22;
-        const y = 0.02;
+        // با فضای مرجعِ "local"، مبدأ روی کفِ زمین نیست، رویِ همون نقطه‌ایه که
+        // سشن شروع شده (تقریباً ارتفاعِ دست/چشم). چون کفِ واقعی رو نمی‌دونیم،
+        // یه افستِ ثابتِ تقریبی به‌سمتِ پایین می‌زنیم که بصری روی زمین بشینه.
+        const y = -1.1;
         // eslint-disable-next-line prettier/prettier
         const verts = new Float32Array([
           p.x + perpX * halfW, y, p.z + perpZ * halfW,
@@ -791,7 +794,7 @@ function XrArView({ distanceMeters, destinationName, onExit }: { distanceMeters:
       pushLog("WebGL context: " + (gl ? "ساخته شد" : "شکست خورد!"));
 
       const session = await xr.requestSession("immersive-ar", {
-        requiredFeatures: ["local-floor"],
+        requiredFeatures: ["local"],
         optionalFeatures: ["dom-overlay"],
         domOverlay: { root: overlayRef.current },
       });
@@ -809,8 +812,8 @@ function XrArView({ distanceMeters, destinationName, onExit }: { distanceMeters:
       const layer = new XRWebGLLayer(session, gl);
       session.updateRenderState({ baseLayer: layer });
       pushLog("XRWebGLLayer ساخته شد. framebuffer=" + !!layer.framebuffer);
-      refSpaceRef.current = await session.requestReferenceSpace("local-floor");
-      pushLog("local-floor reference space گرفته شد.");
+      refSpaceRef.current = await session.requestReferenceSpace("local");
+      pushLog("local reference space گرفته شد.");
 
       session.addEventListener("end", () => {
         pushLog("سشن تموم شد (رویدادِ end).");
