@@ -462,6 +462,11 @@ function ArWalkScreen({ destination, onExit }: { destination: QrDestination; onE
     setCalibrated(true);
   }
 
+  function skipToRealAr() {
+    setCalibrated(true);
+    setViewMode("xr");
+  }
+
   const arrowAngle = heading === null || targetBearing === null ? 0 : signedDiff(targetBearingRef.current - heading);
 
   if (!calibrated) {
@@ -479,6 +484,9 @@ function ArWalkScreen({ destination, onExit }: { destination: QrDestination; onE
             <Compass />
             همینجا، همین جهت
           </Button>
+          <button onClick={skipToRealAr} className="text-xs text-muted underline underline-offset-2">
+            یا مستقیم برو به AR واقعی (بدون قطب‌نما، کالیبراسیونِ خودش رو داره)
+          </button>
         </div>
         <div />
       </div>
@@ -747,7 +755,6 @@ function XrArView({ distanceMeters, destinationName, onExit }: { distanceMeters:
       const canvas = canvasRef.current!;
       const gl = canvas.getContext("webgl", { xrCompatible: true }) as any;
       glRef.current = gl;
-      setupGL();
 
       const session = await xr.requestSession("immersive-ar", {
         requiredFeatures: ["local-floor"],
@@ -755,7 +762,12 @@ function XrArView({ distanceMeters, destinationName, onExit }: { distanceMeters:
         domOverlay: { root: overlayRef.current },
       });
       sessionRef.current = session;
+      // مهم: makeXRCompatible باید قبل از ساختِ شیدر/بافر صدا زده بشه، وگرنه
+      // روی بعضی گوشی‌ها (چند-GPU) این context عوض می‌شه و منابعِ ساخته‌شده
+      // قبلش بی‌اعتبار می‌مونن — دقیقاً همون چیزی که باعث می‌شد خط گاهی
+      // نیاد، بدون هیچ خطایی توی کنسول.
       await gl.makeXRCompatible();
+      setupGL();
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const XRWebGLLayer = (window as any).XRWebGLLayer;
       session.updateRenderState({ baseLayer: new XRWebGLLayer(session, gl) });
