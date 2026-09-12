@@ -628,6 +628,8 @@ function XrArView({ distanceMeters, destinationName, onExit }: { distanceMeters:
   const [supported, setSupported] = useState<boolean | null>(null);
   const [sessionActive, setSessionActive] = useState(false);
   const [calibrated, setCalibrated] = useState(false);
+  const [hasPose, setHasPose] = useState(false);
+  const [trackingHint, setTrackingHint] = useState("در حال شروع…");
   const [error, setError] = useState<string | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
   const [showLog, setShowLog] = useState(false);
@@ -637,6 +639,7 @@ function XrArView({ distanceMeters, destinationName, onExit }: { distanceMeters:
   const distanceElRef = useRef<HTMLParagraphElement>(null);
   const instructionElRef = useRef<HTMLParagraphElement>(null);
   const frameCountRef = useRef(0);
+  const hasPoseRef = useRef(false);
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const sessionRef = useRef<any>(null);
@@ -716,12 +719,41 @@ function XrArView({ distanceMeters, destinationName, onExit }: { distanceMeters:
     frameCountRef.current += 1;
     const everySec = frameCountRef.current % 60 === 0;
 
-    const pose = frame.getViewerPose(refSpaceRef.current);
-    if (!pose) {
-      if (everySec) pushLog(`فریم ${frameCountRef.current}: pose نداره (getViewerPose = null)`);
+    // اگر refSpace هنوز آماده نیست، صبر کن
+    if (!refSpaceRef.current) {
+      if (everySec) pushLog(`فریم ${frameCountRef.current}: refSpace هنوز null است`);
       return;
     }
-    if (everySec) pushLog(`فریم ${frameCountRef.current}: سشن زنده، pose موجوده، calibrated=${calibratedRef.current}`);
+
+    const pose = frame.getViewerPose(refSpaceRef.current);
+    if (!pose) {
+      // ARCore هنوز tracking قفل نکرده — کاربر باید گوشی را آرام حرکت دهد
+      if (hasPoseRef.current) {
+        hasPoseRef.current = false;
+        setHasPose(false);
+      }
+      if (everySec) {
+        pushLog(`فریم ${frameCountRef.current}: pose نداره (getViewerPose = null) — گوشی را آرام حرکت بده`);
+        setTrackingHint("موقعیت قفل نشده — گوشی را آرام چپ/راست و جلو/عقب حرکت بده");
+      }
+      if (instructionElRef.current && !calibratedRef.current) {
+        instructionElRef.current.textContent =
+          "گوشی را آرام حرکت بده تا موقعیت قفل شود…";
+      }
+      return;
+    }
+
+    // اولین بار که pose آمد
+    if (!hasPoseRef.current) {
+      hasPoseRef.current = true;
+      setHasPose(true);
+      setTrackingHint("موقعیت قفل شد — می‌توانی کالیبره کنی");
+      pushLog(`فریم ${frameCountRef.current}: اولین pose دریافت شد ✓`);
+    }
+
+    if (everySec) {
+      pushLog(`فریم ${frameCountRef.current}: سشن زنده، pose موجوده، calibrated=${calibratedRef.current}`);
+    }
 
     const p = pose.transform.position;
     const yaw = computeYaw(pose.transform.orientation);
@@ -793,10 +825,14 @@ function XrArView({ distanceMeters, destinationName, onExit }: { distanceMeters:
       glRef.current = gl;
       pushLog("WebGL context: " + (gl ? "ساخته شد" : "شکست خورد!"));
 
+      // requiredFeatures خالی می‌گذاریم تا سخت‌گیر نباشد.
+      // local-floor و local را optional می‌گیریم و بعداً fallback می‌کنیم.
       const session = await xr.requestSession("immersive-ar", {
-        requiredFeatures: ["local"],
-        optionalFeatures: ["dom-overlay"],
-        domOverlay: { root: overlayRef.current },
+        requiredFeatures: [],
+        optionalFeatures: ["local-floor", "local", "dom-overlay"],
+        ...(overlayRef.current
+          ? { domOverlay: { root: overlayRef.current } }
+          : {}),
       });
       sessionRef.current = session;
       pushLog("سشنِ immersive-ar با موفقیت باز شد.");
@@ -812,8 +848,21 @@ function XrArView({ distanceMeters, destinationName, onExit }: { distanceMeters:
       const layer = new XRWebGLLayer(session, gl);
       session.updateRenderState({ baseLayer: layer });
       pushLog("XRWebGLLayer ساخته شد. framebuffer=" + !!layer.framebuffer);
-      refSpaceRef.current = await session.requestReferenceSpace("local");
-      pushLog("local reference space گرفته شد.");
+
+      // اول local-floor را امتحان کن؛ اگر نبود سراغ local برو
+      try {
+        refSpaceRef.current = await session.requestReferenceSpace("local-floor");
+        pushLog("local-floor reference space گرفته شد.");
+      } catch {
+        try {
+          refSpaceRef.current = await session.requestReferenceSpace("local");
+          pushLog("local-floor نبود → local reference space گرفته شد.");
+        } catch (e2) {
+          const m = e2 instanceof Error ? e2.message : String(e2);
+          pushLog("هیچ reference space گرفته نشد: " + m);
+          throw e2;
+        }
+      }
 
       session.addEventListener("end", () => {
         pushLog("سشن تموم شد (رویدادِ end).");
@@ -822,12 +871,20 @@ function XrArView({ distanceMeters, destinationName, onExit }: { distanceMeters:
         setCalibrated(false);
         calibratedRef.current = false;
         destOffsetRef.current = null;
+        hasPoseRef.current = false;
+        setHasPose(false);
+        setTrackingHint("در حال شروع…");
       });
 
       setSessionActive(true);
+      setHasPose(false);
+      hasPoseRef.current = false;
+      setTrackingHint("گوشی را آرام حرکت بده تا موقعیت قفل شود…");
       frameCountRef.current = 0;
+      lastPoseRef.current = null;
       session.requestAnimationFrame(onXRFrame);
       pushLog("اولین requestAnimationFrame ارسال شد — منتظرِ فریمِ اول...");
+      pushLog("نکته: اگر pose نیامد، گوشی را ۲–۳ ثانیه آرام حرکت بده و به سطح دارای بافت نگاه کن.");
     } catch (err) {
       const msg = err instanceof Error ? err.message : "راه‌اندازیِ AR ناموفق بود.";
       setError(msg);
@@ -837,7 +894,11 @@ function XrArView({ distanceMeters, destinationName, onExit }: { distanceMeters:
 
   function calibrateHere() {
     const pose = lastPoseRef.current;
-    if (!pose) { pushLog("دکمه‌ی کالیبراسیون زده شد ولی هنوز هیچ pose‌ای نداریم!"); return; }
+    if (!pose) {
+      pushLog("دکمه‌ی کالیبراسیون زده شد ولی هنوز هیچ pose‌ای نداریم!");
+      setTrackingHint("هنوز موقعیت قفل نشده — گوشی را حرکت بده و دوباره تلاش کن");
+      return;
+    }
     pushLog(`کالیبره شد در (${pose.x.toFixed(2)}, ${pose.z.toFixed(2)}) yaw=${pose.yaw.toFixed(2)}`);
     destOffsetRef.current = {
       x: pose.x + distanceMeters * Math.sin(pose.yaw),
@@ -845,6 +906,7 @@ function XrArView({ distanceMeters, destinationName, onExit }: { distanceMeters:
     };
     calibratedRef.current = true;
     setCalibrated(true);
+    setTrackingHint("کالیبره شد — مسیر سبز را دنبال کن");
   }
 
   function endSession() {
@@ -903,11 +965,23 @@ function XrArView({ distanceMeters, destinationName, onExit }: { distanceMeters:
             {!calibrated ? (
               <div className="pointer-events-auto mx-auto max-w-xs space-y-3 rounded-2xl bg-black/60 p-4 text-center text-white">
                 <p ref={instructionElRef} className="text-sm">
-                  رو به سمت «{destinationName}» بایست و کالیبره کن
+                  {hasPose
+                    ? `رو به سمت «${destinationName}» بایست و کالیبره کن`
+                    : trackingHint}
                 </p>
-                <Button className="w-full" onClick={calibrateHere}>
+                {!hasPose && (
+                  <p className="text-[11px] leading-relaxed text-white/70">
+                    ARCore برای قفل موقعیت به کمی حرکت و سطح دارای بافت نیاز دارد.
+                    گوشی را ۲–۳ ثانیه آرام بچرخان.
+                  </p>
+                )}
+                <Button
+                  className="w-full"
+                  onClick={calibrateHere}
+                  disabled={!hasPose}
+                >
                   <Compass />
-                  همینجا، همین جهت
+                  {hasPose ? "همینجا، همین جهت" : "منتظر قفل موقعیت…"}
                 </Button>
               </div>
             ) : (
