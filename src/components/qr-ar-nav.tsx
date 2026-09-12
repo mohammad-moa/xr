@@ -629,11 +629,14 @@ function XrArView({ distanceMeters, destinationName, onExit }: { distanceMeters:
   const [sessionActive, setSessionActive] = useState(false);
   const [calibrated, setCalibrated] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [logs, setLogs] = useState<string[]>([]);
+  const [showLog, setShowLog] = useState(false);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLDivElement>(null);
   const distanceElRef = useRef<HTMLParagraphElement>(null);
   const instructionElRef = useRef<HTMLParagraphElement>(null);
+  const frameCountRef = useRef(0);
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const sessionRef = useRef<any>(null);
@@ -651,11 +654,22 @@ function XrArView({ distanceMeters, destinationName, onExit }: { distanceMeters:
   const destOffsetRef = useRef<{ x: number; z: number } | null>(null);
   const calibratedRef = useRef(false);
 
+  // گزارشِ زنده — همون چیزی که توی فایلِ تستیِ جدا داشتیم، حالا همینجا.
+  // پیش‌فرض بسته‌ست تا برای نمایش به کارفرما تمیز بمونه؛ با دکمه‌ی 🪲 باز میشه.
+  function pushLog(msg: string) {
+    const line = `[${new Date().toLocaleTimeString("fa-IR")}] ${msg}`;
+    setLogs((prev) => [...prev.slice(-39), line]);
+  }
+
   useEffect(() => {
+    pushLog("در حال بررسیِ پشتیبانیِ WebXR...");
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const xr = (navigator as any).xr;
-    if (!xr) { setSupported(false); return; }
-    xr.isSessionSupported("immersive-ar").then((ok: boolean) => setSupported(ok)).catch(() => setSupported(false));
+    if (!xr) { setSupported(false); pushLog("navigator.xr وجود نداره — این مرورگر اصلاً WebXR نداره."); return; }
+    xr.isSessionSupported("immersive-ar")
+      .then((ok: boolean) => { setSupported(ok); pushLog("isSessionSupported: " + ok); })
+      .catch((err: Error) => { setSupported(false); pushLog("خطا در isSessionSupported: " + err.message); });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   function setupGL() {
@@ -666,6 +680,9 @@ function XrArView({ distanceMeters, destinationName, onExit }: { distanceMeters:
       const sh = gl.createShader(type);
       gl.shaderSource(sh, src);
       gl.compileShader(sh);
+      if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+        pushLog("خطای کامپایلِ شیدر: " + gl.getShaderInfoLog(sh));
+      }
       return sh;
     }
     const vs = compile(gl.VERTEX_SHADER, vsSrc);
@@ -674,11 +691,17 @@ function XrArView({ distanceMeters, destinationName, onExit }: { distanceMeters:
     gl.attachShader(program, vs);
     gl.attachShader(program, fs);
     gl.linkProgram(program);
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+      pushLog("خطای لینکِ برنامه: " + gl.getProgramInfoLog(program));
+    } else {
+      pushLog("شیدرها ساخته و لینک شدن.");
+    }
     programRef.current = program;
     posLocRef.current = gl.getAttribLocation(program, "aPos");
     mvpLocRef.current = gl.getUniformLocation(program, "uMVP");
     colorLocRef.current = gl.getUniformLocation(program, "uColor");
     bufferRef.current = gl.createBuffer();
+    pushLog(`posLoc=${posLocRef.current} mvpLoc=${!!mvpLocRef.current} colorLoc=${!!colorLocRef.current} buffer=${!!bufferRef.current}`);
   }
 
   function computeYaw(orientation: { x: number; y: number; z: number; w: number }) {
@@ -690,8 +713,15 @@ function XrArView({ distanceMeters, destinationName, onExit }: { distanceMeters:
     const session = sessionRef.current;
     if (!session) return;
     session.requestAnimationFrame(onXRFrame);
+    frameCountRef.current += 1;
+    const everySec = frameCountRef.current % 60 === 0;
+
     const pose = frame.getViewerPose(refSpaceRef.current);
-    if (!pose) return;
+    if (!pose) {
+      if (everySec) pushLog(`فریم ${frameCountRef.current}: pose نداره (getViewerPose = null)`);
+      return;
+    }
+    if (everySec) pushLog(`فریم ${frameCountRef.current}: سشن زنده، pose موجوده، calibrated=${calibratedRef.current}`);
 
     const p = pose.transform.position;
     const yaw = computeYaw(pose.transform.orientation);
@@ -741,20 +771,24 @@ function XrArView({ distanceMeters, destinationName, onExit }: { distanceMeters:
           gl.uniform4f(colorLocRef.current, 0.16, 0.75, 0.62, 0.75);
           gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
         }
+        if (everySec) pushLog(`خط رسم شد. فاصله فعلی: ${len.toFixed(2)} متر.`);
       }
     } else if (instructionElRef.current) {
       instructionElRef.current.textContent = `رو به سمت «${destinationName}» بایست و کالیبره کن`;
+      if (everySec) pushLog("منتظرِ کالیبراسیون — هنوز دکمه‌ی «همینجا، همین جهت» زده نشده.");
     }
   }
 
   async function startSession() {
     setError(null);
+    pushLog("در حال شروعِ AR واقعی...");
     try {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const xr = (navigator as any).xr;
       const canvas = canvasRef.current!;
       const gl = canvas.getContext("webgl", { xrCompatible: true }) as any;
       glRef.current = gl;
+      pushLog("WebGL context: " + (gl ? "ساخته شد" : "شکست خورد!"));
 
       const session = await xr.requestSession("immersive-ar", {
         requiredFeatures: ["local-floor"],
@@ -762,18 +796,24 @@ function XrArView({ distanceMeters, destinationName, onExit }: { distanceMeters:
         domOverlay: { root: overlayRef.current },
       });
       sessionRef.current = session;
+      pushLog("سشنِ immersive-ar با موفقیت باز شد.");
       // مهم: makeXRCompatible باید قبل از ساختِ شیدر/بافر صدا زده بشه، وگرنه
       // روی بعضی گوشی‌ها (چند-GPU) این context عوض می‌شه و منابعِ ساخته‌شده
       // قبلش بی‌اعتبار می‌مونن — دقیقاً همون چیزی که باعث می‌شد خط گاهی
       // نیاد، بدون هیچ خطایی توی کنسول.
       await gl.makeXRCompatible();
+      pushLog("makeXRCompatible تموم شد.");
       setupGL();
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const XRWebGLLayer = (window as any).XRWebGLLayer;
-      session.updateRenderState({ baseLayer: new XRWebGLLayer(session, gl) });
+      const layer = new XRWebGLLayer(session, gl);
+      session.updateRenderState({ baseLayer: layer });
+      pushLog("XRWebGLLayer ساخته شد. framebuffer=" + !!layer.framebuffer);
       refSpaceRef.current = await session.requestReferenceSpace("local-floor");
+      pushLog("local-floor reference space گرفته شد.");
 
       session.addEventListener("end", () => {
+        pushLog("سشن تموم شد (رویدادِ end).");
         sessionRef.current = null;
         setSessionActive(false);
         setCalibrated(false);
@@ -782,15 +822,20 @@ function XrArView({ distanceMeters, destinationName, onExit }: { distanceMeters:
       });
 
       setSessionActive(true);
+      frameCountRef.current = 0;
       session.requestAnimationFrame(onXRFrame);
+      pushLog("اولین requestAnimationFrame ارسال شد — منتظرِ فریمِ اول...");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "راه‌اندازیِ AR ناموفق بود.");
+      const msg = err instanceof Error ? err.message : "راه‌اندازیِ AR ناموفق بود.";
+      setError(msg);
+      pushLog("خطا در startSession: " + msg);
     }
   }
 
   function calibrateHere() {
     const pose = lastPoseRef.current;
-    if (!pose) return;
+    if (!pose) { pushLog("دکمه‌ی کالیبراسیون زده شد ولی هنوز هیچ pose‌ای نداریم!"); return; }
+    pushLog(`کالیبره شد در (${pose.x.toFixed(2)}, ${pose.z.toFixed(2)}) yaw=${pose.yaw.toFixed(2)}`);
     destOffsetRef.current = {
       x: pose.x + distanceMeters * Math.sin(pose.yaw),
       z: pose.z - distanceMeters * Math.cos(pose.yaw),
@@ -833,6 +878,9 @@ function XrArView({ distanceMeters, destinationName, onExit }: { distanceMeters:
               شروعِ AR واقعی
             </Button>
             <Button variant="secondary" onClick={onExit}>برگرد</Button>
+            <button onClick={() => setShowLog((s) => !s)} className="text-xs text-white/50 underline underline-offset-2">
+              🪲 گزارشِ فنی
+            </button>
           </div>
         )}
 
@@ -843,7 +891,10 @@ function XrArView({ distanceMeters, destinationName, onExit }: { distanceMeters:
                 <ArrowRight className="rotate-180" />
                 خروج
               </Button>
-              <span className="rounded-full bg-black/50 px-3 py-1 text-xs text-white">{destinationName}</span>
+              <div className="flex items-center gap-2">
+                <button onClick={() => setShowLog((s) => !s)} className="rounded-full bg-black/50 px-2 py-1 text-xs text-white">🪲</button>
+                <span className="rounded-full bg-black/50 px-3 py-1 text-xs text-white">{destinationName}</span>
+              </div>
             </div>
 
             {!calibrated ? (
@@ -866,6 +917,12 @@ function XrArView({ distanceMeters, destinationName, onExit }: { distanceMeters:
                 </p>
               </div>
             )}
+          </div>
+        )}
+
+        {showLog && (
+          <div dir="ltr" className="pointer-events-auto absolute inset-x-0 bottom-0 max-h-[40%] overflow-y-auto bg-black/85 p-2 font-mono text-[10px] leading-tight text-lime-300">
+            {logs.length === 0 ? <p>(هنوز گزارشی نیست)</p> : logs.map((l, i) => <p key={i}>{l}</p>)}
           </div>
         )}
       </div>
