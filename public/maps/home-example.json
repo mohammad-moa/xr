@@ -1,0 +1,22 @@
+{
+  "version": 2,
+  "mapName": "خانه نمونه",
+  "unit": "meters",
+  "nodes": [
+    { "id": "door-bedroom", "x": 0, "y": 0, "kind": "origin", "name": "درب اتاق خواب" },
+    { "id": "hall-1", "x": 0, "y": 2.5, "kind": "waypoint", "name": "راهرو ۱" },
+    { "id": "corner", "x": 0, "y": 5, "kind": "waypoint", "name": "پیچ راهرو" },
+    { "id": "hall-2", "x": 2.5, "y": 5, "kind": "waypoint", "name": "راهرو ۲" },
+    { "id": "kitchen", "x": 5, "y": 5, "kind": "destination", "name": "آشپزخانه" },
+    { "id": "living", "x": 5, "y": 2, "kind": "destination", "name": "پذیرایی" },
+    { "id": "bath", "x": -2, "y": 5, "kind": "destination", "name": "سرویس" }
+  ],
+  "edges": [
+    ["door-bedroom", "hall-1"],
+    ["hall-1", "corner"],
+    ["corner", "hall-2"],
+    ["hall-2", "kitchen"],
+    ["hall-2", "living"],
+    ["corner", "bath"]
+  ]
+}
