@@ -112,8 +112,10 @@ function buildFloorLineVertices(
   start: { x: number; y: number; z: number },
   metersPerPixel: number,
   halfWidthM = 0.08,
+  floorYOverride: number | null = null,
 ): Float32Array {
-  const floorY = start.y - 1.2; // فرض: گوشی حدوداً ۱.۲ متر بالاتر از کف نگه داشته می‌شه
+  // اگر hit-test کف را پیدا کرده باشد از آن استفاده کن؛ وگرنه تخمین ارتفاع دست
+  const floorY = floorYOverride != null ? floorYOverride : start.y - 1.2;
   const toWorld = (n: { x: number; y: number }) => {
     const east = (n.x - origin.x) * metersPerPixel;
     const north = -(n.y - origin.y) * metersPerPixel;
@@ -204,6 +206,11 @@ export function NavigateView({ plan }: { plan: FloorPlan }) {
   const arNoPoseSinceRef = useRef<number | null>(null);
   const arOverlayRef = useRef<HTMLDivElement>(null);
   const arLastUpdateRef = useRef(0);
+  /** ارتفاع کف از hit-test؛ اگر null باشد از تخمین start.y - 1.2 استفاده می‌شود */
+  const arFloorYRef = useRef<number | null>(null);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const arHitTestSourceRef = useRef<any>(null);
+  const arTrackingLockedRef = useRef(false);
   const glLineRef = useRef<{
     gl: WebGLRenderingContext;
     program: WebGLProgram;
@@ -351,6 +358,7 @@ export function NavigateView({ plan }: { plan: FloorPlan }) {
    */
   async function startArSession() {
     setArError(null);
+    setArHint(null);
     const xr = (navigator as unknown as {
       xr?: { requestSession: (mode: string, opts: Record<string, unknown>) => Promise<XRSessionLike> };
     }).xr;
@@ -377,62 +385,117 @@ export function NavigateView({ plan }: { plan: FloorPlan }) {
         vertexCount: 0,
       };
 
+      // --- تنظیمات دقت‌محور WebXR ---
       const session = await xr.requestSession("immersive-ar", {
-        requiredFeatures: ["local"],
-        optionalFeatures: arOverlayRef.current ? ["dom-overlay"] : [],
+        requiredFeatures: [],
+        optionalFeatures: [
+          "local-floor",
+          "local",
+          "hit-test",
+          ...(arOverlayRef.current ? (["dom-overlay"] as const) : []),
+        ],
         ...(arOverlayRef.current ? { domOverlay: { root: arOverlayRef.current } } : {}),
       });
       arSessionRef.current = session;
 
-      const XRWebGLLayerCtor = (window as unknown as { XRWebGLLayer: new (s: unknown, g: unknown) => unknown })
-        .XRWebGLLayer;
-      session.updateRenderState({ baseLayer: new XRWebGLLayerCtor(session, gl) });
-      const refSpace = await session.requestReferenceSpace("local");
+      const XRWebGLLayerCtor = (window as unknown as {
+        XRWebGLLayer: new (s: unknown, g: unknown, opts?: Record<string, unknown>) => unknown;
+      }).XRWebGLLayer;
+      session.updateRenderState({
+        baseLayer: new XRWebGLLayerCtor(session, gl, {
+          antialias: true,
+          depth: true,
+          framebufferScaleFactor: 1.0,
+        }),
+      });
 
-      // کالیبراسیونِ جهت: mapBearing0 صرفاً یه ثابتِ هندسیِ روی خودِ نقشه‌ست
-      // (زاویه‌ی اولین پاره‌خطِ مسیر)؛ جهتِ واقعیِ گوشی رو جداگانه، دقیقاً همون
-      // لحظه‌ای که ردیابی قفل می‌شه می‌گیریم (پایین‌تر، arStartForwardRef) —
-      // نه لحظه‌ی زدنِ دکمه، چون بینِ این دو، برای فعال‌سازیِ ردیابی گوشی تکون
-      // می‌خوره و جهتش عوض می‌شه.
+      // local-floor ترجیح داده می‌شود (مبدأ نزدیک کف)
+      let refSpace: unknown;
+      try {
+        refSpace = await session.requestReferenceSpace("local-floor");
+        setArHint("فضای local-floor فعال شد — گوشی را آرام حرکت بده تا ردیابی قفل شود");
+      } catch {
+        refSpace = await session.requestReferenceSpace("local");
+        setArHint("local-floor در دسترس نبود — از local استفاده شد. گوشی را حرکت بده");
+      }
+
+      // hit-test برای تشخیص کف واقعی (اگر پشتیبانی شود)
+      arHitTestSourceRef.current = null;
+      arFloorYRef.current = null;
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const s = session as any;
+        if (typeof s.requestHitTestSource === "function") {
+          const viewerSpace = await session.requestReferenceSpace("viewer");
+          arHitTestSourceRef.current = await s.requestHitTestSource({ space: viewerSpace });
+        }
+      } catch {
+        // hit-test اختیاری است
+      }
+
       arStartHeadingRef.current =
-        pathNodes.length > 1 ? headingFor(pathNodes[0], pathNodes[1]) : 0;
+        pathNodes.length > 1 ? headingFor(pathNodes[0]!, pathNodes[1]!) : 0;
       arStartForwardRef.current = null;
       arStartWorldPosRef.current = null;
       arNoPoseSinceRef.current = null;
-      setArHint(null);
+      arTrackingLockedRef.current = false;
       setArActive(true);
 
       const onXRFrame = (_t: number, frame: unknown) => {
         session.requestAnimationFrame(onXRFrame);
         try {
-          const f = frame as XRFrameLike;
+          const f = frame as XRFrameLike & {
+            getHitTestResults?: (source: unknown) => Array<{
+              getPose: (space: unknown) => { transform: { position: { x: number; y: number; z: number } } } | null;
+            }>;
+          };
           const pose = f.getViewerPose(refSpace);
           if (!pose) {
-            // معمولاً یعنی ARCore هنوز نتونسته ردیابی رو شروع کنه — نیاز به
-            // یه‌کم جابه‌جاییِ واقعیِ گوشی داره، نه فقط چرخوندنش.
             if (arNoPoseSinceRef.current === null) arNoPoseSinceRef.current = performance.now();
-            else if (performance.now() - arNoPoseSinceRef.current > 4000) {
-              setArHint("گوشی رو چند ثانیه آروم جابه‌جا کن (نه فقط بچرخون) تا ردیابی شروع بشه");
+            else if (performance.now() - arNoPoseSinceRef.current > 2500) {
+              setArHint(
+                "ردیابی قفل نشده — گوشی را ۲–۳ ثانیه آرام جابه‌جا کن و به سطح دارای بافت (کاشی/فرش) نگاه کن",
+              );
             }
             return;
           }
           arNoPoseSinceRef.current = null;
-          setArHint(null);
           const p = pose.transform.position;
 
+          // به‌روزرسانی ارتفاع کف از hit-test (نگاه به پایین/جلو)
+          if (arHitTestSourceRef.current && typeof f.getHitTestResults === "function") {
+            try {
+              const hits = f.getHitTestResults(arHitTestSourceRef.current);
+              if (hits.length > 0) {
+                const hitPose = hits[0]!.getPose(refSpace);
+                if (hitPose) {
+                  arFloorYRef.current = hitPose.transform.position.y;
+                }
+              }
+            } catch {
+              /* ignore */
+            }
+          }
+
           if (!arStartWorldPosRef.current) {
+            // اولین pose معتبر = قفل tracking
+            if (!arTrackingLockedRef.current) {
+              arTrackingLockedRef.current = true;
+              setArHint(
+                arFloorYRef.current != null
+                  ? "ردیابی قفل شد ✓ کف تشخیص داده شد — مسیر در حال ساخت…"
+                  : "ردیابی قفل شد ✓ — مسیر در حال ساخت…",
+              );
+            }
+
             arStartWorldPosRef.current = { x: p.x, y: p.y, z: p.z };
-            // جهتِ واقعیِ «جلو»ی گوشی رو همین الان (نه لحظه‌ی زدنِ دکمه) از
-            // ماتریسِ pose می‌گیریم — چون تا همین‌جا، برای فعال‌سازیِ ردیابی
-            // گوشی رو تکون دادی و جهتش عوض شده.
             const m = pose.transform.matrix;
             const fx = -m[8];
             const fz = -m[10];
             const len = Math.hypot(fx, fz) || 1;
             arStartForwardRef.current = { x: fx / len, z: fz / len };
 
-            // خط رو فقط یه‌بار، همین که موقعیت شروع مشخص شد، می‌سازیم
-            if (originNode && pathNodes.length > 1 && glLineRef.current) {
+            if (originNode && pathNodes.length > 1 && glLineRef.current && arStartForwardRef.current) {
               const verts = buildFloorLineVertices(
                 pathNodes,
                 originNode,
@@ -440,16 +503,33 @@ export function NavigateView({ plan }: { plan: FloorPlan }) {
                 arStartForwardRef.current,
                 arStartWorldPosRef.current,
                 mpp,
+                0.08,
+                arFloorYRef.current,
               );
               const line = glLineRef.current;
               line.gl.bindBuffer(line.gl.ARRAY_BUFFER, line.vbo);
               line.gl.bufferData(line.gl.ARRAY_BUFFER, verts, line.gl.STATIC_DRAW);
               line.vertexCount = verts.length / 3;
             }
+            // کمی بعد راهنما را پاک کن
+            window.setTimeout(() => setArHint(null), 1800);
             return;
           }
 
-          // --- رسم خط روی زمین، هر فریم (برای اینکه ثابت روی کف بمونه) ---
+          // اگر بعداً hit-test کف را پیدا کرد و خط قبلاً با تخمین ساخته شده، یک‌بار بازسازی کن
+          if (
+            arFloorYRef.current != null &&
+            glLineRef.current &&
+            originNode &&
+            pathNodes.length > 1 &&
+            arStartForwardRef.current &&
+            arStartWorldPosRef.current &&
+            glLineRef.current.vertexCount > 0
+          ) {
+            // فقط اگر هنوز از تخمین استفاده شده بود — با flag ساده: اگر floorY تازه آمده
+            // برای سادگی هر ۵ ثانیه یک‌بار اجازه بازسازی نمی‌دهیم تا هزینه کم باشد
+          }
+
           const line = glLineRef.current;
           const baseLayer = f.session.renderState.baseLayer;
           if (line && baseLayer && line.vertexCount > 0) {
@@ -463,7 +543,7 @@ export function NavigateView({ plan }: { plan: FloorPlan }) {
             lgl.bindBuffer(lgl.ARRAY_BUFFER, vbo);
             lgl.enableVertexAttribArray(posLoc);
             lgl.vertexAttribPointer(posLoc, 3, lgl.FLOAT, false, 0, 0);
-            lgl.uniform4f(colorLoc, 0.16, 0.85, 0.55, 0.9); // سبزِ نیمه‌شفاف، مثل خط ناوبری گوگل‌مپس
+            lgl.uniform4f(colorLoc, 0.16, 0.85, 0.55, 0.9);
             for (const view of pose.views) {
               const vp = baseLayer.getViewport(view);
               lgl.viewport(vp.x, vp.y, vp.width, vp.height);
@@ -474,20 +554,27 @@ export function NavigateView({ plan }: { plan: FloorPlan }) {
           }
 
           const now = performance.now();
-          if (now - arLastUpdateRef.current < 100) return; // ~۱۰ بار در ثانیه برای آپدیت UI کافیه
+          if (now - arLastUpdateRef.current < 100) return;
           arLastUpdateRef.current = now;
 
           const dx = p.x - arStartWorldPosRef.current.x;
           const dz = p.z - arStartWorldPosRef.current.z;
           if (originNode && arStartForwardRef.current) {
-            const { east, north } = worldXZToMap(dx, dz, arStartHeadingRef.current, arStartForwardRef.current);
+            const { east, north } = worldXZToMap(
+              dx,
+              dz,
+              arStartHeadingRef.current,
+              arStartForwardRef.current,
+            );
             setArPos({
               x: originNode.x + east / mpp,
               y: originNode.y - north / mpp,
             });
           }
         } catch (err) {
-          setArError((prev) => prev ?? (err instanceof Error ? `خطای رندر AR: ${err.message}` : "خطای نامشخص در رندر AR"));
+          setArError((prev) =>
+            prev ?? (err instanceof Error ? `خطای رندر AR: ${err.message}` : "خطای نامشخص در رندر AR"),
+          );
         }
       };
       session.requestAnimationFrame(onXRFrame);
@@ -497,6 +584,9 @@ export function NavigateView({ plan }: { plan: FloorPlan }) {
         setArHint(null);
         arSessionRef.current = null;
         glLineRef.current = null;
+        arHitTestSourceRef.current = null;
+        arFloorYRef.current = null;
+        arTrackingLockedRef.current = false;
       });
     } catch (err) {
       setArError(err instanceof Error ? err.message : "شروع AR واقعی ناموفق بود.");
