@@ -12,6 +12,11 @@ import {
   signedDeg,
   normDeg,
 } from "@/lib/floorplan/pathfinding";
+import {
+  currentTurnStep,
+  getTurnInstructions,
+  metersUntilNextTurn,
+} from "@/lib/floorplan/meter-map";
 
 type XRFrameLike = {
   session: {
@@ -220,10 +225,19 @@ export function NavigateView({ plan }: { plan: FloorPlan }) {
   );
   const totalPx = useMemo(() => pathLengthPx(pathNodes), [pathNodes]);
   useEffect(() => { totalPxRef.current = totalPx; }, [totalPx]);
-  const totalM = totalPx * plan.metersPerPixel;
-  const remainingM = Math.max(0, (totalPx - travelled) * plan.metersPerPixel);
+  // مقیاس خراب قدیمی را دور بزن
+  const mpp =
+    plan.metersPerPixel > 0 && plan.metersPerPixel !== 0.024
+      ? plan.metersPerPixel
+      : 0.01;
+  const totalM = totalPx * mpp;
+  const remainingM = Math.max(0, (totalPx - travelled) * mpp);
+  const travelledM = travelled * mpp;
   const traveler = pathNodes.length ? pointAlongPath(pathNodes, travelled) : null;
   const arrived = remainingM < 0.4 && pathNodes.length > 0;
+  const turnSteps = useMemo(() => getTurnInstructions(pathNodes), [pathNodes]);
+  const activeTurn = currentTurnStep(turnSteps, travelledM);
+  const untilTurnM = metersUntilNextTurn(turnSteps, travelledM);
   const targetBearing = traveler ? headingFor(traveler.from, traveler.to) : 0;
   const liveHeading = heading ?? simHeading;
   const arrowAngle = arrived ? 0 : signedDeg(targetBearing - liveHeading);
@@ -236,7 +250,7 @@ export function NavigateView({ plan }: { plan: FloorPlan }) {
   // به مقصد اشاره می‌کنه.
   const arRemainingM =
     arActive && arPos && destination
-      ? Math.hypot(destination.x - arPos.x, destination.y - arPos.y) * plan.metersPerPixel
+      ? Math.hypot(destination.x - arPos.x, destination.y - arPos.y) * mpp
       : null;
   const arBearing = arActive && arPos && destination ? headingFor(arPos, destination) : 0;
   const arArrowAngle = signedDeg(arBearing - liveHeading);
@@ -275,7 +289,7 @@ export function NavigateView({ plan }: { plan: FloorPlan }) {
       const diff = hasCompassRef.current
         ? Math.abs(signedDeg(targetBearingRef.current - liveHeadingRef.current))
         : 0;
-      const stepPx = STEP_LENGTH_M / plan.metersPerPixel;
+      const stepPx = STEP_LENGTH_M / mpp;
       const forward = diff <= 90; // هم‌جهت با مسیر
       setTravelled((t) =>
         Math.max(0, Math.min(totalPxRef.current, t + (forward ? stepPx : -stepPx))),
@@ -425,7 +439,7 @@ export function NavigateView({ plan }: { plan: FloorPlan }) {
                 arStartHeadingRef.current,
                 arStartForwardRef.current,
                 arStartWorldPosRef.current,
-                plan.metersPerPixel,
+                mpp,
               );
               const line = glLineRef.current;
               line.gl.bindBuffer(line.gl.ARRAY_BUFFER, line.vbo);
@@ -468,8 +482,8 @@ export function NavigateView({ plan }: { plan: FloorPlan }) {
           if (originNode && arStartForwardRef.current) {
             const { east, north } = worldXZToMap(dx, dz, arStartHeadingRef.current, arStartForwardRef.current);
             setArPos({
-              x: originNode.x + east / plan.metersPerPixel,
-              y: originNode.y - north / plan.metersPerPixel,
+              x: originNode.x + east / mpp,
+              y: originNode.y - north / mpp,
             });
           }
         } catch (err) {
@@ -512,7 +526,7 @@ export function NavigateView({ plan }: { plan: FloorPlan }) {
       if (lastTs.current == null) lastTs.current = ts;
       const dt = Math.min(0.1, (ts - lastTs.current) / 1000);
       lastTs.current = ts;
-      const stepPx = (speedMps * dt) / plan.metersPerPixel;
+      const stepPx = (speedMps * dt) / mpp;
       setTravelled((t) => Math.min(totalPx, t + stepPx));
       walkRef.current = requestAnimationFrame(tick);
     };
@@ -520,7 +534,7 @@ export function NavigateView({ plan }: { plan: FloorPlan }) {
     return () => {
       if (walkRef.current) cancelAnimationFrame(walkRef.current);
     };
-  }, [walking, arrived, totalPx, plan.metersPerPixel]);
+  }, [walking, arrived, totalPx, mpp]);
 
   useEffect(() => {
     if (traveler && heading === null) setSimHeading(traveler.heading);
@@ -585,7 +599,7 @@ export function NavigateView({ plan }: { plan: FloorPlan }) {
         <ul className="flex flex-col gap-2">
           {destinationNodes.map((d) => {
             const p = shortestPath(plan.nodes, plan.edges, originNode.id, d.id);
-            const meters = pathLengthPx(p) * plan.metersPerPixel;
+            const meters = pathLengthPx(p) * (plan.metersPerPixel > 0 && plan.metersPerPixel !== 0.024 ? plan.metersPerPixel : 0.01);
             const reachable = p.length > 0;
             return (
               <li key={d.id}>
@@ -700,17 +714,31 @@ export function NavigateView({ plan }: { plan: FloorPlan }) {
                 : `${remainingM.toFixed(0)} m`}
           </p>
           <GuideArrow angle={arActive ? arArrowAngle : arrowAngle} />
-          <p className="mt-1 rounded-full bg-nav-fg/12 px-3 py-1 text-xs tabular-nums">
-            {arActive
-              ? arArrived
+          <div className="mt-2 max-w-xs rounded-2xl bg-nav-fg/12 px-4 py-2 text-center">
+            <p className="text-sm font-semibold">
+              {arrived || arArrived
                 ? `به ${destination?.name ?? ""} رسیدید`
-                : "موقعیت واقعی (ARCore)"
-              : arrived
-                ? `به ${destination?.name ?? ""} رسیدید`
-                : heading === null
-                  ? `شبیه‌ساز قطب‌نما · بخش ${traveler?.legIndex ?? 0}/${Math.max(1, pathNodes.length - 1)}`
-                  : `بخش ${traveler?.legIndex ?? 0}/${Math.max(1, pathNodes.length - 1)}`}
-          </p>
+                : activeTurn?.kind === "left"
+                  ? "↰ به چپ بپیچید"
+                  : activeTurn?.kind === "right"
+                    ? "↱ به راست بپیچید"
+                    : activeTurn?.kind === "arrive"
+                      ? "به مقصد نزدیک شدید"
+                      : Math.abs(arActive ? arArrowAngle : arrowAngle) < 20
+                        ? "مستقیم بروید"
+                        : (arActive ? arArrowAngle : arrowAngle) > 0
+                          ? "به راست متمایل شوید"
+                          : "به چپ متمایل شوید"}
+            </p>
+            <p className="mt-0.5 text-xs text-nav-fg/70 tabular-nums">
+              {arrived || arArrived
+                ? "مسیر تمام شد"
+                : untilTurnM > 0.4
+                  ? `${untilTurnM.toFixed(1)} متر تا پیچ/دستور بعدی`
+                  : activeTurn?.instruction ||
+                    (arActive ? "موقعیت واقعی (ARCore) — خط سبز روی زمین" : `بخش ${traveler?.legIndex ?? 0}/${Math.max(1, pathNodes.length - 1)}`)}
+            </p>
+          </div>
         </div>
 
         <div className="space-y-2">

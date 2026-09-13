@@ -5,7 +5,6 @@ import { EditView } from "@/components/edit-view";
 import { NavigateView } from "@/components/navigate-view";
 import { QrArNav } from "@/components/qr-ar-nav";
 import { MeterMapEditor } from "@/components/meter-map-editor";
-import { MeterNavView } from "@/components/meter-nav-view";
 import { cn } from "@/lib/utils";
 import type { FloorPlan } from "@/lib/floorplan/types";
 import { samplePlan } from "@/lib/floorplan/sample";
@@ -19,7 +18,6 @@ type Tab = "edit" | "meter" | "navigate" | "qr";
 
 function initialPlan(): FloorPlan {
   try {
-    // پیش‌فرض: خانهٔ نمونه متری (با پیچ) — برای دموی کارفرما
     return buildPlanFromMeterJson(HOME_EXAMPLE_JSON);
   } catch {
     return samplePlan();
@@ -33,7 +31,6 @@ export function AppHome() {
 
   useEffect(() => {
     const loaded = loadPlan();
-    // اگر نقشهٔ ذخیره‌شده مقیاس خراب قدیمی داشت، خانهٔ نمونه را بگذار
     if (loaded.metersPerPixel === 0.024 || loaded.nodes.length === 0) {
       setPlan(initialPlan());
     } else {
@@ -72,7 +69,7 @@ export function AppHome() {
             </span>
             <div>
               <p className="text-sm font-semibold leading-tight">راهیاب</p>
-              <p className="text-[11px] text-muted">ناوبری داخل ساختمان</p>
+              <p className="text-[11px] text-muted">ناوبری AR داخل ساختمان</p>
             </div>
           </div>
         </div>
@@ -83,7 +80,7 @@ export function AppHome() {
           {(
             [
               { key: "meter", label: "نقشه متری", icon: Ruler },
-              { key: "navigate", label: "ناوبری", icon: Compass },
+              { key: "navigate", label: "ناوبری AR", icon: Compass },
               { key: "edit", label: "ویرایش", icon: Map },
               { key: "qr", label: "QR کاربر", icon: ScanLine },
             ] as const
@@ -122,7 +119,8 @@ export function AppHome() {
         />
       )}
       {tab === "edit" && <EditView plan={plan} setPlan={setPlan} />}
-      {tab === "navigate" && <MeterNavView plan={plan} />}
+      {/* NavigateView = AR واقعی WebXR + مسیر چندسگمنت + دستور پیچ */}
+      {tab === "navigate" && <NavigateView plan={plan} />}
 
       <Toaster
         position="bottom-center"
